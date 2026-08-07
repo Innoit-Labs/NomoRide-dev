@@ -1,0 +1,52 @@
+class WithdrawalRequest {
+  const WithdrawalRequest({
+    required this.id,
+    required this.amount,
+    required this.status,
+    required this.payTo,
+    this.notes,
+    this.upiId,
+    this.bankAccountNumber,
+    this.bankIfsc,
+    this.bankAccountName,
+    this.createdAt,
+  });
+
+  final String id;
+  final double amount;
+  final String status;
+  final String payTo;
+  final String? notes;
+  final String? upiId;
+  final String? bankAccountNumber;
+  final String? bankIfsc;
+  final String? bankAccountName;
+  final DateTime? createdAt;
+
+  factory WithdrawalRequest.fromJson(Map<String, dynamic> json) {
+    return WithdrawalRequest(
+      id: json['id']?.toString() ?? '',
+      amount: _toDouble(json['amount']),
+      status: json['status']?.toString() ?? 'pending',
+      payTo: json['payTo']?.toString() ?? json['pay_to']?.toString() ?? '',
+      notes: json['notes']?.toString(),
+      upiId: json['upi_id']?.toString() ?? json['upiId']?.toString(),
+      bankAccountNumber: json['bank_account_number']?.toString() ??
+          json['bankAccountNumber']?.toString(),
+      bankIfsc: json['bank_ifsc']?.toString() ?? json['bankIfsc']?.toString(),
+      bankAccountName: json['bank_account_name']?.toString() ??
+          json['bankAccountName']?.toString(),
+      createdAt: _parseDate(json['created_at'] ?? json['createdAt']),
+    );
+  }
+
+  static double _toDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  static DateTime? _parseDate(dynamic value) {
+    if (value == null) return null;
+    return DateTime.tryParse(value.toString());
+  }
+}
