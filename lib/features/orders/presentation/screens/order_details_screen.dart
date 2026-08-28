@@ -486,20 +486,6 @@
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _buildCustomerDetails(),
-                    if (_journey.showCustomerDeliveryAddress) ...[
-                      SizedBox(height: 16.h),
-                      _buildHighlightedAddressCard(
-                        title: _isReturnOrder
-                            ? 'CUSTOMER RETURN ADDRESS'
-                            : 'CUSTOMER DELIVERY ADDRESS',
-                        address: _isReturnOrder
-                            ? order.pickupAddress
-                            : order.dropAddress,
-                        fallback: _isReturnOrder
-                            ? 'Customer return address not available'
-                            : 'Delivery address not available',
-                      ),
-                    ],
                     if (_journey.showIapReturnAddress) ...[
                       SizedBox(height: 16.h),
                       _buildHighlightedAddressCard(
@@ -556,7 +542,7 @@
                     _buildDeliveryDetail(
                       icon: Icons.calendar_today_outlined,
                       label: _scheduleLabel,
-                      value: order.formattedScheduleTime,
+                      value: order.formattedDeliverySchedule,
                     ),
                     SizedBox(height: 16.h),
                   ],
@@ -774,6 +760,8 @@
     Widget _buildRejectedBanner() {
       final status = _order?.status.toLowerCase().trim();
       final label = status == 'not_delivered' ? 'Not Delivered' : 'Order Rejected';
+      final reason = _order?.rejectionReason?.trim();
+      final hasReason = reason != null && reason.isNotEmpty;
       return Container(
         width: double.infinity,
         padding: EdgeInsets.all(16.w),
@@ -782,13 +770,28 @@
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: Colors.red.withValues(alpha: 0.4)),
         ),
-        child: Text(
-          label,
-          textAlign: TextAlign.center,
-          style: CustomTextStyles.montserratBold.copyWith(
-            fontSize: 14.fSize,
-            color: Colors.redAccent,
-          ),
+        child: Column(
+          children: [
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: CustomTextStyles.montserratBold.copyWith(
+                fontSize: 14.fSize,
+                color: Colors.redAccent,
+              ),
+            ),
+            if (hasReason) ...[
+              SizedBox(height: 8.h),
+              Text(
+                'Reason: $reason',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12.fSize,
+                  color: Colors.white70,
+                ),
+              ),
+            ],
+          ],
         ),
       );
     }

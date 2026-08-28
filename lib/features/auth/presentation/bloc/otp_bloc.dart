@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter/foundation.dart';
 import 'package:nomoride/core/network/api_exception.dart';
 import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/core/services/onesignal_service.dart';
 import 'package:nomoride/features/auth/data/auth_repository.dart';
 import 'package:nomoride/features/auth/data/models/otp_session.dart';
 
@@ -73,11 +75,23 @@ class OtpBloc extends Bloc<OtpEvent, OtpState> {
         partnerId: _session.partnerId,
       );
 
+      debugPrint('[OTP DEBUG] Verify OTP response received');
+      debugPrint('[OTP DEBUG] About to save AuthSession');
+
       await AuthSession.save(
         token: authToken,
         partner: _session.partnerId,
         mobile: _session.mobileNumber,
       );
+
+      debugPrint('[OTP DEBUG] AuthSession.save completed');
+      debugPrint('[OTP DEBUG] OneSignal partnerId: ${_session.partnerId}');
+      debugPrint('[OTP DEBUG] About to initialize OneSignal');
+
+      await OneSignalService.initialize(partnerId: _session.partnerId);
+
+      debugPrint('[OTP DEBUG] OneSignal initialization call completed');
+      debugPrint('[OTP DEBUG] About to continue existing navigation flow');
 
       emit(state.copyWith(isSuccess: true, isLoading: false));
     } on ApiException catch (error) {

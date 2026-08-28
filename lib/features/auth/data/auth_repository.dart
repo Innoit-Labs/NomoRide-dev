@@ -140,14 +140,31 @@ class AuthRepository {
   void _logRequest(String label, Uri uri, Map<String, dynamic> payload) {
     debugPrint('========== $label API REQUEST ==========');
     debugPrint('URL: $uri');
-    debugPrint('Body: ${jsonEncode(payload)}');
+    final safePayload = Map<String, dynamic>.from(payload);
+    if (safePayload.containsKey('otp')) {
+      safePayload['otp'] = '[REDACTED]';
+    }
+    debugPrint('Body: ${jsonEncode(safePayload)}');
     debugPrint('========================================');
   }
 
   void _logResponse(String label, int statusCode, String body) {
     debugPrint('========== $label API RESPONSE ==========');
     debugPrint('Status: $statusCode');
-    debugPrint('Body: $body');
+    String safeBody = body;
+    try {
+      final parsed = jsonDecode(body);
+      if (parsed is Map && parsed.containsKey('data') && parsed['data'] is Map) {
+        final dataMap = Map<String, dynamic>.from(parsed['data']);
+        if (dataMap.containsKey('authToken')) {
+          dataMap['authToken'] = '[REDACTED]';
+          final updated = Map<String, dynamic>.from(parsed);
+          updated['data'] = dataMap;
+          safeBody = jsonEncode(updated);
+        }
+      }
+    } catch (_) {}
+    debugPrint('Body: $safeBody');
     debugPrint('=========================================');
   }
 }

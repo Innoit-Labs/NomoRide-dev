@@ -49,5 +49,9 @@
 	<string>Nomoride uses your location to verify arrival and delivery confirmation.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Nomoride uses your location to verify arrival and delivery confirmation.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 </dict>
 </plist>

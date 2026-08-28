@@ -34,6 +34,9 @@ class DpOrder {
     this.arrivedAtDeliveryAt,
     this.deliveredAt,
     this.completedAt,
+    this.deliveryDate,
+    this.deliveryTime,
+    this.rejectionReason,
   });
 
   final String? id;
@@ -65,6 +68,9 @@ class DpOrder {
   final String? arrivedAtDeliveryAt;
   final String? deliveredAt;
   final String? completedAt;
+  final String? deliveryDate;
+  final String? deliveryTime;
+  final String? rejectionReason;
 
   OrderFlow get journey => OrderFlow(this);
 
@@ -250,6 +256,54 @@ class DpOrder {
     }
   }
 
+  String get formattedDeliverySchedule {
+    final dateStr = deliveryDate?.trim();
+    final timeStr = deliveryTime?.trim();
+
+    if (dateStr == null || dateStr.isEmpty) {
+      return formattedScheduleTime;
+    }
+
+    String displayDate = '';
+    try {
+      final date = DateTime.parse(dateStr).toLocal();
+      const weekdays = [
+        'Monday',
+        'Tuesday',
+        'Wednesday',
+        'Thursday',
+        'Friday',
+        'Saturday',
+        'Sunday',
+      ];
+      final weekday = weekdays[date.weekday - 1];
+      final day = date.day;
+      final suffix = _daySuffix(day);
+      const months = [
+        'Jan',
+        'Feb',
+        'Mar',
+        'Apr',
+        'May',
+        'Jun',
+        'Jul',
+        'Aug',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Dec',
+      ];
+      displayDate = '$weekday, $day$suffix ${months[date.month - 1]}';
+    } catch (_) {
+      displayDate = dateStr;
+    }
+
+    if (timeStr != null && timeStr.isNotEmpty) {
+      return '$displayDate $timeStr';
+    }
+    return displayDate;
+  }
+
   String? get packageDescription {
     final text = description?.trim();
     if (text != null && text.isNotEmpty) return text;
@@ -288,7 +342,10 @@ class DpOrder {
 
   bool get isAccepted {
     final normalizedStatus = status.toLowerCase().trim();
-    if (normalizedStatus == 'assigned' || normalizedStatus == 'return_assigned') {
+    if (normalizedStatus == 'assigned' ||
+        normalizedStatus == 'return_assigned' ||
+        normalizedStatus == 'not_delivered' ||
+        normalizedStatus == 'rejected') {
       return false;
     }
     return journey.hasStarted;
@@ -305,6 +362,9 @@ class DpOrder {
     String? arrivedAtDeliveryAt,
     String? deliveredAt,
     String? completedAt,
+    String? deliveryDate,
+    String? deliveryTime,
+    String? rejectionReason,
   }) {
     return DpOrder(
       id: id,
@@ -336,6 +396,9 @@ class DpOrder {
       arrivedAtDeliveryAt: arrivedAtDeliveryAt ?? this.arrivedAtDeliveryAt,
       deliveredAt: deliveredAt ?? this.deliveredAt,
       completedAt: completedAt ?? this.completedAt,
+      deliveryDate: deliveryDate ?? this.deliveryDate,
+      deliveryTime: deliveryTime ?? this.deliveryTime,
+      rejectionReason: rejectionReason ?? this.rejectionReason,
     );
   }
 
@@ -446,6 +509,15 @@ class DpOrder {
       arrivedAtDeliveryAt: _readString(json['arrived_at_delivery_at']),
       deliveredAt: _readString(json['delivered_at']),
       completedAt: _readString(json['completed_at']),
+      deliveryDate: _readString(json['delivery_date'] ?? json['deliveryDate']),
+      deliveryTime: _readString(json['delivery_time'] ?? json['deliveryTime']),
+      rejectionReason: _readString(
+        json['rejection_reason'] ??
+            json['rejectionReason'] ??
+            json['reject_reason'] ??
+            json['rejectReason'] ??
+            json['not_delivered_reason'],
+      ),
     );
   }
 

@@ -57,6 +57,25 @@ class MyOrdersRepository {
       if (response.statusCode == 200 && success) {
         final payload = _ordersPayload(json);
         if (payload != null) {
+          debugPrint('[ORDER DEBUG] myorders response received');
+          final completed = payload['completedOrders'] ?? payload['completed_orders'];
+          final intransit = payload['intransist_orders'] ?? payload['in_transit_orders'] ?? payload['inTransitOrders'];
+          int totalItemsCount = 0;
+          void countItems(dynamic ordersList) {
+            if (ordersList is List) {
+              for (final order in ordersList) {
+                if (order is Map) {
+                  final items = order['items'] ?? order['products'];
+                  if (items is List) {
+                    totalItemsCount += items.length;
+                  }
+                }
+              }
+            }
+          }
+          countItems(completed);
+          countItems(intransit);
+          debugPrint('[ORDER DEBUG] items count: $totalItemsCount');
           return MyOrdersData.fromJson(payload);
         }
         throw const ApiException('Invalid my orders response from server.');

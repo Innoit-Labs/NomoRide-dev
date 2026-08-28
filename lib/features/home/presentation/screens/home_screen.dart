@@ -82,7 +82,9 @@ class _HomeScreenState extends State<HomeScreen> {
       _isLoadingDashboard = false;
 
       if (ordersResult is List<DpOrder>) {
-        _orders = ordersResult;
+        _orders = ordersResult
+            .where((order) => order.status.toLowerCase().trim() != 'completed')
+            .toList();
         _ordersError = null;
       } else {
         _ordersError = ordersResult?.toString() ?? 'Failed to load orders.';
@@ -119,6 +121,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _acceptOrder(DpOrder order) async {
     if (_updatingOrderNumbers.contains(order.orderNumber)) return;
+    if (order.status.toLowerCase().trim() == 'not_delivered' ||
+        order.status.toLowerCase().trim() == 'rejected') {
+      return;
+    }
 
     setState(() => _updatingOrderNumbers.add(order.orderNumber));
 
@@ -130,7 +136,11 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
       final refreshed = await _ordersRepository.getDpOrders();
       if (!mounted) return;
-      setState(() => _orders = refreshed);
+      setState(() {
+        _orders = refreshed
+            .where((order) => order.status.toLowerCase().trim() != 'completed')
+            .toList();
+      });
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -151,6 +161,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _orders = _orders
           .map((item) =>
               item.orderNumber == updated.orderNumber ? updated : item)
+          .where((order) => order.status.toLowerCase().trim() != 'completed')
           .toList();
     });
   }
@@ -265,26 +276,30 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
 
         SizedBox(width: 12.w),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'WELCOME',
-              style: CustomTextStyles.openSansRegular.copyWith(
-                fontSize: 10,
-                letterSpacing: 2,
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'WELCOME',
+                style: CustomTextStyles.openSansRegular.copyWith(
+                  fontSize: 10,
+                  letterSpacing: 2,
+                ),
               ),
-            ),
-            Text(
-              _partnerDisplayName ?? AuthSession.mobileNumber ?? 'Partner',
-              style: CustomTextStyles.montserratBold.copyWith(
-                fontSize: 14,
-                letterSpacing: 1,
+              Text(
+                _partnerDisplayName ?? AuthSession.mobileNumber ?? 'Partner',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: CustomTextStyles.montserratBold.copyWith(
+                  fontSize: 14,
+                  letterSpacing: 1,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-        const Spacer(),
+        SizedBox(width: 8.w),
 
         GestureDetector(
           onTap: () {
@@ -583,7 +598,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   : null,
             ),
           ],
-          if (order.scheduledTime != null) ...[
+          if (order.formattedDeliverySchedule != 'Not scheduled') ...[
             SizedBox(height: 16.h),
             Row(
               children: [
@@ -593,11 +608,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   size: 16.h,
                 ),
                 SizedBox(width: 8.w),
-                Text(
-                  order.formattedScheduleTime,
-                  style: CustomTextStyles.openSansSemiBold.copyWith(
-                    fontSize: 14.fSize,
-                    color: AppColours.primary.withValues(alpha: 0.9),
+                Expanded(
+                  child: Text(
+                    order.formattedDeliverySchedule,
+                    style: CustomTextStyles.openSansSemiBold.copyWith(
+                      fontSize: 14.fSize,
+                      color: AppColours.primary.withValues(alpha: 0.9),
+                    ),
                   ),
                 ),
               ],
@@ -606,79 +623,133 @@ class _HomeScreenState extends State<HomeScreen> {
           SizedBox(height: 24.h),
           Row(
             children: [
-              Expanded(
-                child: order.isAccepted
-                    ? OutlinedButton(
-                        onPressed: isUpdating
-                            ? null
-                            : () async {
-                                final updated = await Navigator.pushNamed(
-                                  context,
-                                  AppRoutes.orderDetailsScreen,
-                                  arguments: {
-                                    'order': order,
-                                    'enableWorkflow': true,
-                                  },
-                                );
-                                if (updated is DpOrder) {
-                                  _replaceOrder(updated);
-                                }
+              if (order.status.toLowerCase().trim() == 'not_delivered' ||
+                  order.status.toLowerCase().trim() == 'rejected') ...[
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: isUpdating
+                        ? null
+                        : () async {
+                            final updated = await Navigator.pushNamed(
+                              context,
+                              AppRoutes.orderDetailsScreen,
+                              arguments: {
+                                'order': order,
+                                'enableWorkflow': false,
                               },
-                        style: OutlinedButton.styleFrom(
-                          padding: EdgeInsets.symmetric(vertical: 14.h),
-                          side: const BorderSide(color: Colors.white24),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: const Text(
-                          'View Order Details',
-                          style: TextStyle(color: Colors.white, fontSize: 13),
-                        ),
-                      )
-                    : ElevatedButton(
-                        onPressed: isUpdating
-                            ? null
-                            : () => _showAcceptDialog(context, onAccept),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.transparent,
-                          shadowColor: Colors.transparent,
-                          padding: EdgeInsets.zero,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: Ink(
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(12),
-                            gradient: const LinearGradient(
-                              colors: [Color(0xFFE6C27A), Color(0xFFE6C27A)],
-                            ),
-                          ),
-                          child: Container(
-                            alignment: Alignment.center,
-                            padding: EdgeInsets.symmetric(vertical: 16.h),
-                            child: isUpdating
-                                ? const SizedBox(
-                                    height: 22,
-                                    width: 22,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.black,
-                                    ),
-                                  )
-                                : const Text(
-                                    'Accept',
-                                    style: TextStyle(
-                                      color: Colors.black,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                          ),
+                            );
+                            if (updated is DpOrder) {
+                              _replaceOrder(updated);
+                            }
+                          },
+                    style: OutlinedButton.styleFrom(
+                      padding: EdgeInsets.symmetric(vertical: 14.h),
+                      side: const BorderSide(color: Colors.white24),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      'View Details',
+                      style: TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                  ),
+                ),
+                SizedBox(width: 12.w),
+                Expanded(
+                  child: Container(
+                    alignment: Alignment.center,
+                    padding: EdgeInsets.symmetric(vertical: 14.h),
+                    decoration: BoxDecoration(
+                      color: Colors.red.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.red.withValues(alpha: 0.4)),
+                    ),
+                    child: Text(
+                      'NOT DELIVERED',
+                      style: CustomTextStyles.montserratBold.copyWith(
+                        fontSize: 13.fSize,
+                        color: Colors.redAccent,
+                      ),
+                    ),
+                  ),
+                ),
+              ] else if (order.isAccepted) ...[
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: isUpdating
+                        ? null
+                        : () async {
+                            final updated = await Navigator.pushNamed(
+                              context,
+                              AppRoutes.orderDetailsScreen,
+                              arguments: {
+                                'order': order,
+                                'enableWorkflow': true,
+                              },
+                            );
+                            if (updated is DpOrder) {
+                              _replaceOrder(updated);
+                            }
+                          },
+                    style: OutlinedButton.styleFrom(
+                      padding: EdgeInsets.symmetric(vertical: 14.h),
+                      side: const BorderSide(color: Colors.white24),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      'View Order Details',
+                      style: TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                  ),
+                ),
+              ] else
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: isUpdating
+                        ? null
+                        : () => _showAcceptDialog(context, onAccept),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.transparent,
+                      shadowColor: Colors.transparent,
+                      padding: EdgeInsets.zero,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: Ink(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFFE6C27A), Color(0xFFE6C27A)],
                         ),
                       ),
-              ),
+                      child: Container(
+                        alignment: Alignment.center,
+                        padding: EdgeInsets.symmetric(vertical: 16.h),
+                        child: isUpdating
+                            ? const SizedBox(
+                                height: 22,
+                                width: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.black,
+                                ),
+                              )
+                            : const Text(
+                                'Accept',
+                                style: TextStyle(
+                                  color: Colors.black,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                ),
+                              ),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ],

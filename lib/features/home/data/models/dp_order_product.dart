@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+
 class DpOrderGarment {
   const DpOrderGarment({
     this.name,
@@ -134,6 +137,8 @@ class DpOrderGarment {
 
   static String? _readImageUrl(Map<String, dynamic> json) {
     final candidates = [
+      json['primary_image_url'],
+      json['primaryImageUrl'],
       json['image'],
       json['image_url'],
       json['imageUrl'],
@@ -320,6 +325,57 @@ class DpOrderProduct {
   }
 
   static List<DpOrderGarment> _readGarments(Map<String, dynamic> json) {
+    var kitDetailsRaw = json['kitDetails'] ?? json['kit_details'];
+    if (kitDetailsRaw != null) {
+      debugPrint('[ORDER DEBUG] kitDetails found');
+      Map<String, dynamic>? kitDetailsMap;
+      if (kitDetailsRaw is Map) {
+        kitDetailsMap = kitDetailsRaw.map((k, v) => MapEntry(k.toString(), v));
+      } else if (kitDetailsRaw is String) {
+        try {
+          final decoded = jsonDecode(kitDetailsRaw);
+          if (decoded is Map) {
+            kitDetailsMap = decoded.map((k, v) => MapEntry(k.toString(), v));
+          }
+        } catch (_) {}
+      }
+
+      if (kitDetailsMap != null) {
+        var selectedItemsRaw = kitDetailsMap['selectedItems'] ?? kitDetailsMap['selected_items'];
+        if (selectedItemsRaw != null) {
+          List? selectedList;
+          if (selectedItemsRaw is List) {
+            selectedList = selectedItemsRaw;
+          } else if (selectedItemsRaw is String) {
+            try {
+              final decoded = jsonDecode(selectedItemsRaw);
+              if (decoded is List) {
+                selectedList = decoded;
+              }
+            } catch (_) {}
+          }
+
+          if (selectedList != null && selectedList.isNotEmpty) {
+            debugPrint('[ORDER DEBUG] selectedItems count: ${selectedList.length}');
+            final List<DpOrderGarment> list = [];
+            for (final item in selectedList) {
+              if (item is Map) {
+                final garmentMap = item.map((k, v) => MapEntry(k.toString(), v));
+                final g = DpOrderGarment.fromJson(garmentMap);
+                if (g.name != null && g.name!.isNotEmpty) {
+                  debugPrint('[ORDER DEBUG] Mapping garment: ${g.name}');
+                  list.add(g);
+                }
+              }
+            }
+            if (list.isNotEmpty) {
+              return list;
+            }
+          }
+        }
+      }
+    }
+
     final candidates = [
       json['garments'],
       json['garment_list'],

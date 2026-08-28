@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:nomoride/core/services/onesignal_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class AuthSession {
@@ -39,7 +40,7 @@ class AuthSession {
     }
 
     debugPrint('========== AUTH TOKEN ==========');
-    debugPrint('authToken: $token');
+    debugPrint('authToken: [REDACTED]');
     debugPrint('partnerId: $partnerId');
     debugPrint('mobileNumber: $mobileNumber');
     debugPrint('================================');
@@ -55,6 +56,8 @@ class AuthSession {
     await prefs.remove(_keyAuthToken);
     await prefs.remove(_keyPartnerId);
     await prefs.remove(_keyMobileNumber);
+
+    await OneSignalService.logout();
   }
 
   static bool get isLoggedIn =>
