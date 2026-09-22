@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:nomoride/core/config/api_config.dart';
 import 'package:nomoride/core/network/api_exception.dart';
+import 'package:nomoride/core/network/session_guard.dart';
 import 'package:nomoride/core/services/auth_session.dart';
 import 'package:nomoride/features/home/data/models/dashboard_data.dart';
 
@@ -14,8 +15,7 @@ class DashboardRepository {
   final http.Client _client;
 
   Future<DashboardData> getDashboardData() async {
-    final token = AuthSession.authToken?.trim();
-    if (token == null || token.isEmpty) {
+    if (!AuthSession.hasValidSession) {
       throw const ApiException('Please login to view dashboard data.');
     }
 
@@ -32,6 +32,7 @@ class DashboardRepository {
       );
 
       _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
 
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;

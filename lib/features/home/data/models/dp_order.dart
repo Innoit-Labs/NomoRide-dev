@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:nomoride/features/home/data/models/dp_order_product.dart';
+import 'package:nomoride/features/home/data/models/order_item_section.dart';
 import 'package:nomoride/features/home/data/models/order_journey.dart';
 
 class DpOrder {
@@ -37,6 +38,8 @@ class DpOrder {
     this.deliveryDate,
     this.deliveryTime,
     this.rejectionReason,
+    this.waited10mins,
+    this.pickupFailedImages = const [],
   });
 
   final String? id;
@@ -71,6 +74,8 @@ class DpOrder {
   final String? deliveryDate;
   final String? deliveryTime;
   final String? rejectionReason;
+  final int? waited10mins;
+  final List<String> pickupFailedImages;
 
   OrderFlow get journey => OrderFlow(this);
 
@@ -97,6 +102,44 @@ class DpOrder {
 
   @Deprecated('Use isReturnFlow')
   bool get isReturnOrder => isReturnFlow;
+
+  /// Normalizes API status for safe comparisons (`not_delivered`, `Not Delivered`, etc.).
+  String get normalizedStatus =>
+      status.trim().toLowerCase().replaceAll(RegExp(r'[_\s]+'), ' ');
+
+  /// Underscore API status key used for workflow transitions (`in_transit_to_iap`).
+  String get apiStatusKey =>
+      status.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_');
+
+  bool get isNotDelivered {
+    final s = normalizedStatus;
+    if (s == 'not delivered' ||
+        s == 'not_delivered' ||
+        s == 'failed' ||
+        s == 'return failed' ||
+        s == 'mark return as failed') {
+      return true;
+    }
+    final reason = rejectionReason?.trim();
+    if (reason != null &&
+        reason.isNotEmpty &&
+        reason.toLowerCase() != 'null') {
+      return true;
+    }
+    if (pickupFailedImages.isNotEmpty) {
+      return true;
+    }
+    return false;
+  }
+
+  bool get isRejectedStatus =>
+      normalizedStatus == 'rejected' ||
+      normalizedStatus == 'order rejected' ||
+      normalizedStatus == 'order failed';
+
+  /// Orders shown on Home → Orders Assigned (excludes completed and not delivered).
+  bool get isVisibleOnHomeAssigned =>
+      !isNotDelivered && normalizedStatus != 'completed';
 
   /// Resolves the action button label from API [stepLabels].
   String labelForStep({
@@ -257,51 +300,68 @@ class DpOrder {
   }
 
   String get formattedDeliverySchedule {
-    final dateStr = deliveryDate?.trim();
-    final timeStr = deliveryTime?.trim();
+    final dateStr = _resolvedDeliveryDate?.trim();
+    final timeStr = _resolvedDeliveryTime?.trim();
 
     if (dateStr == null || dateStr.isEmpty) {
-      return formattedScheduleTime;
+      return 'Not scheduled';
     }
 
-    String displayDate = '';
-    try {
-      final date = DateTime.parse(dateStr).toLocal();
-      const weekdays = [
-        'Monday',
-        'Tuesday',
-        'Wednesday',
-        'Thursday',
-        'Friday',
-        'Saturday',
-        'Sunday',
-      ];
-      final weekday = weekdays[date.weekday - 1];
-      final day = date.day;
-      final suffix = _daySuffix(day);
-      const months = [
-        'Jan',
-        'Feb',
-        'Mar',
-        'Apr',
-        'May',
-        'Jun',
-        'Jul',
-        'Aug',
-        'Sep',
-        'Oct',
-        'Nov',
-        'Dec',
-      ];
-      displayDate = '$weekday, $day$suffix ${months[date.month - 1]}';
-    } catch (_) {
-      displayDate = dateStr;
-    }
+    final displayDate = _formatCalendarDateLabel(dateStr) ?? dateStr;
 
     if (timeStr != null && timeStr.isNotEmpty) {
       return '$displayDate $timeStr';
     }
     return displayDate;
+  }
+
+  String? get _resolvedDeliveryDate {
+    final stored = deliveryDate?.trim();
+    if (stored != null && stored.isNotEmpty) return _normalizeDateOnly(stored);
+    return null;
+  }
+
+  String? get _resolvedDeliveryTime {
+    final stored = deliveryTime?.trim();
+    if (stored != null && stored.isNotEmpty) return stored;
+    return null;
+  }
+
+  static String? _formatCalendarDateLabel(String value) {
+    final match = RegExp(r'(\d{4})-(\d{2})-(\d{2})').firstMatch(value.trim());
+    if (match == null) return null;
+
+    final year = int.parse(match.group(1)!);
+    final month = int.parse(match.group(2)!);
+    final day = int.parse(match.group(3)!);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+    const weekdays = [
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+      'Sunday',
+    ];
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+
+    final weekday = weekdays[DateTime(year, month, day).weekday - 1];
+    return '$weekday, $day${_daySuffix(day)} ${months[month - 1]}';
   }
 
   String? get packageDescription {
@@ -331,6 +391,13 @@ class DpOrder {
 
   int get productCount => products.isEmpty ? 0 : products.length;
 
+  List<OrderProductSection> get productSections =>
+      OrderProductSectionBuilder.build(products);
+
+  List<DpOrderProduct> get displayProducts => [
+        for (final section in productSections) ...section.products,
+      ];
+
   String get itemsCountLabel {
     final count = productCount;
     if (count <= 0) return '';
@@ -341,11 +408,10 @@ class DpOrder {
       !isReturnFlow && journey.currentPhase == OrderPhase.pickup;
 
   bool get isAccepted {
-    final normalizedStatus = status.toLowerCase().trim();
-    if (normalizedStatus == 'assigned' ||
-        normalizedStatus == 'return_assigned' ||
-        normalizedStatus == 'not_delivered' ||
-        normalizedStatus == 'rejected') {
+    if (isNotDelivered || isRejectedStatus) return false;
+
+    final statusKey = apiStatusKey;
+    if (statusKey == 'assigned' || statusKey == 'return_assigned') {
       return false;
     }
     return journey.hasStarted;
@@ -365,6 +431,8 @@ class DpOrder {
     String? deliveryDate,
     String? deliveryTime,
     String? rejectionReason,
+    int? waited10mins,
+    List<String>? pickupFailedImages,
   }) {
     return DpOrder(
       id: id,
@@ -399,6 +467,8 @@ class DpOrder {
       deliveryDate: deliveryDate ?? this.deliveryDate,
       deliveryTime: deliveryTime ?? this.deliveryTime,
       rejectionReason: rejectionReason ?? this.rejectionReason,
+      waited10mins: waited10mins ?? this.waited10mins,
+      pickupFailedImages: pickupFailedImages ?? this.pickupFailedImages,
     );
   }
 
@@ -509,8 +579,8 @@ class DpOrder {
       arrivedAtDeliveryAt: _readString(json['arrived_at_delivery_at']),
       deliveredAt: _readString(json['delivered_at']),
       completedAt: _readString(json['completed_at']),
-      deliveryDate: _readString(json['delivery_date'] ?? json['deliveryDate']),
-      deliveryTime: _readString(json['delivery_time'] ?? json['deliveryTime']),
+      deliveryDate: _readDeliveryDate(json),
+      deliveryTime: _readDeliveryTime(json),
       rejectionReason: _readString(
         json['rejection_reason'] ??
             json['rejectionReason'] ??
@@ -518,7 +588,47 @@ class DpOrder {
             json['rejectReason'] ??
             json['not_delivered_reason'],
       ),
+      waited10mins: _readInt(json['waited10mins'] ?? json['waited_10_mins']),
+      pickupFailedImages: _readStringList(
+        json['pickup_failed_images'] ??
+            json['pickup_failed_image'] ??
+            json['pickupFailedImages'],
+      ),
     );
+  }
+
+  static List<String> _readStringList(dynamic value) {
+    if (value == null) return const [];
+    if (value is List) {
+      final list = <String>[];
+      for (final item in value) {
+        if (item is String && item.trim().isNotEmpty) {
+          list.add(item.trim());
+        } else if (item is Map) {
+          final url = item['url']?.toString().trim();
+          if (url != null && url.isNotEmpty) list.add(url);
+        }
+      }
+      return list;
+    }
+    if (value is String) {
+      final text = value.trim();
+      if (text.isEmpty || text == 'null' || text == '[]') return const [];
+      if (text.startsWith('[')) {
+        try {
+          final decoded = jsonDecode(text);
+          if (decoded is List) return _readStringList(decoded);
+        } catch (_) {}
+      }
+      return [text];
+    }
+    return const [];
+  }
+
+  static int? _readInt(dynamic value) {
+    if (value == null) return null;
+    if (value is num) return value.toInt();
+    return int.tryParse(value.toString().trim());
   }
 
   static Map<String, dynamic>? _readCustomerMap(Map<String, dynamic> json) {
@@ -530,32 +640,35 @@ class DpOrder {
   }
 
   static List<DpOrderProduct> _readProducts(Map<String, dynamic> json) {
-    final candidates = [
-      json['products'],
-      json['items'],
-      json['order_items'],
-      json['orderItems'],
-      json['line_items'],
-      json['lineItems'],
-      json['garments'],
-      json['package_items'],
-      json['packageItems'],
-    ];
+    final items = json['items'];
+    if (items is! List || items.isEmpty) return const [];
+    return _parseProductItems(items);
+  }
 
-    for (final candidate in candidates) {
-      final products = DpOrderProduct.listFromJson(candidate);
-      if (products.isNotEmpty) return products;
+  static List<DpOrderProduct> _parseProductItems(List<dynamic> rawItems) {
+    final products = <DpOrderProduct>[];
+    final seenKeys = <String>{};
+
+    for (final entry in rawItems) {
+      if (entry is! Map) continue;
+      final map = entry.map((key, value) => MapEntry(key.toString(), value));
+      final dedupeKey = _itemDedupeKey(map);
+      if (seenKeys.contains(dedupeKey)) continue;
+      seenKeys.add(dedupeKey);
+
+      final product = DpOrderProduct.fromJson(map);
+      final hasContent = (product.name?.trim().isNotEmpty == true) ||
+          (product.kitType?.trim().isNotEmpty == true) ||
+          product.garments.isNotEmpty;
+      if (hasContent) products.add(product);
     }
 
-    // Nested order payload (some APIs wrap details under `order`).
-    final nested = json['order'] ?? json['order_details'] ?? json['orderDetails'];
-    if (nested is Map) {
-      final nestedMap =
-          nested.map((key, value) => MapEntry(key.toString(), value));
-      return _readProducts(nestedMap);
-    }
+    return products;
+  }
 
-    return const [];
+  static String _itemDedupeKey(Map<String, dynamic> json) {
+    final productId = json['productId'];
+    return 'product:${productId?.toString().trim() ?? json.hashCode}';
   }
 
   static Map<String, String> _readStepLabels(Map<String, dynamic> json) {
@@ -644,6 +757,69 @@ class DpOrder {
     if (value == null) return null;
     if (value is num) return value.toDouble();
     return double.tryParse(value.toString());
+  }
+
+  static String? _normalizeDateOnly(String? value) {
+    if (value == null) return null;
+    final match = RegExp(r'(\d{4})-(\d{2})-(\d{2})').firstMatch(value.trim());
+    if (match == null) return value.trim();
+    return '${match.group(1)}-${match.group(2)}-${match.group(3)}';
+  }
+
+  static String? _readDeliveryDate(Map<String, dynamic> json) {
+    return _normalizeDateOnly(
+      _readKitDetailField(
+        json,
+        fieldKeys: const ['delivery_date'],
+      ),
+    );
+  }
+
+  static String? _readDeliveryTime(Map<String, dynamic> json) {
+    return _readKitDetailField(
+      json,
+      fieldKeys: const ['delivery_time'],
+    );
+  }
+
+  static String? _readKitDetailField(
+    Map<String, dynamic> json, {
+    required List<String> fieldKeys,
+  }) {
+    final items = json['items'];
+    if (items is! List) return null;
+
+    for (final item in items) {
+      final itemMap = _tryParseMap(item);
+      if (itemMap == null) continue;
+
+      final kitMap = _tryParseMap(itemMap['kitDetails']);
+      if (kitMap == null) continue;
+
+      for (final key in fieldKeys) {
+        final value = _readString(kitMap[key]);
+        if (value != null) return value;
+      }
+    }
+    return null;
+  }
+
+  static Map<String, dynamic>? _tryParseMap(dynamic value) {
+    if (value is Map) {
+      return value.map((key, val) => MapEntry(key.toString(), val));
+    }
+
+    if (value is String) {
+      final text = value.trim();
+      if (text.isEmpty || !text.startsWith('{')) return null;
+      try {
+        final decoded = jsonDecode(text);
+        if (decoded is Map) {
+          return decoded.map((key, val) => MapEntry(key.toString(), val));
+        }
+      } catch (_) {}
+    }
+    return null;
   }
 
   static String _daySuffix(int day) {

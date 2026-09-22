@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:nomoride/core/network/session_guard.dart';
 import 'package:nomoride/core/services/auth_session.dart';
 import 'package:nomoride/core/services/waitlist_session.dart';
 import 'package:nomoride/routes/app_routes.dart';
@@ -28,6 +29,7 @@ class MyApp extends StatelessWidget {
           theme: ThemeHelper.themeDataData,
           title: 'nomowear',
           debugShowCheckedModeBanner: false,
+          navigatorKey: SessionGuard.navigatorKey,
           initialRoute: AppRoutes.initialRoute,
           routes: AppRoutes.routes,
         );

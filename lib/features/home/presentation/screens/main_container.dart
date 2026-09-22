@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/routes/app_routes.dart';
 import '../../../orders/presentation/screens/orders_screen.dart';
 import '../../../profile/presentation/screens/profile_screen.dart';
 import 'home_screen.dart';
@@ -20,6 +22,26 @@ class _MainContainerState extends State<MainContainer> {
     OrdersScreen(),
     ProfileScreen(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _ensureAuthenticated();
+    });
+  }
+
+  Future<void> _ensureAuthenticated() async {
+    await AuthSession.restore();
+    if (!mounted) return;
+    if (AuthSession.hasValidSession) return;
+
+    Navigator.pushNamedAndRemoveUntil(
+      context,
+      AppRoutes.loginScreen,
+      (route) => false,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {

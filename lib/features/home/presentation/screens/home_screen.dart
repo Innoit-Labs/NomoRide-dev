@@ -83,7 +83,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (ordersResult is List<DpOrder>) {
         _orders = ordersResult
-            .where((order) => order.status.toLowerCase().trim() != 'completed')
+            .where((order) => order.isVisibleOnHomeAssigned)
             .toList();
         _ordersError = null;
       } else {
@@ -121,8 +121,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _acceptOrder(DpOrder order) async {
     if (_updatingOrderNumbers.contains(order.orderNumber)) return;
-    if (order.status.toLowerCase().trim() == 'not_delivered' ||
-        order.status.toLowerCase().trim() == 'rejected') {
+    if (order.isNotDelivered || order.isRejectedStatus) {
       return;
     }
 
@@ -138,7 +137,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
       setState(() {
         _orders = refreshed
-            .where((order) => order.status.toLowerCase().trim() != 'completed')
+            .where((order) => order.isVisibleOnHomeAssigned)
             .toList();
       });
     } catch (error) {
@@ -158,10 +157,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _replaceOrder(DpOrder updated) {
     setState(() {
+      if (updated.isNotDelivered) {
+        _orders = _orders
+            .where((item) => item.orderNumber != updated.orderNumber)
+            .toList();
+        return;
+      }
+
       _orders = _orders
           .map((item) =>
               item.orderNumber == updated.orderNumber ? updated : item)
-          .where((order) => order.status.toLowerCase().trim() != 'completed')
+          .where((order) => order.isVisibleOnHomeAssigned)
           .toList();
     });
   }
@@ -623,8 +629,7 @@ class _HomeScreenState extends State<HomeScreen> {
           SizedBox(height: 24.h),
           Row(
             children: [
-              if (order.status.toLowerCase().trim() == 'not_delivered' ||
-                  order.status.toLowerCase().trim() == 'rejected') ...[
+              if (order.isNotDelivered || order.isRejectedStatus) ...[
                 Expanded(
                   child: OutlinedButton(
                     onPressed: isUpdating
@@ -666,7 +671,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       border: Border.all(color: Colors.red.withValues(alpha: 0.4)),
                     ),
                     child: Text(
-                      'NOT DELIVERED',
+                      order.isReturnFlow ? 'RETURN FAILED' : 'NOT DELIVERED',
                       style: CustomTextStyles.montserratBold.copyWith(
                         fontSize: 13.fSize,
                         color: Colors.redAccent,
@@ -707,25 +712,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ] else
                 Expanded(
-                  child: ElevatedButton(
-                    onPressed: isUpdating
-                        ? null
-                        : () => _showAcceptDialog(context, onAccept),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.transparent,
-                      shadowColor: Colors.transparent,
-                      padding: EdgeInsets.zero,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: Ink(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(12),
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFFE6C27A), Color(0xFFE6C27A)],
-                        ),
-                      ),
+                  child: Material(
+                    color: const Color(0xFFE6C27A),
+                    borderRadius: BorderRadius.circular(12),
+                    child: InkWell(
+                      onTap: isUpdating
+                          ? null
+                          : () => _showAcceptDialog(context, onAccept),
+                      borderRadius: BorderRadius.circular(12),
                       child: Container(
                         alignment: Alignment.center,
                         padding: EdgeInsets.symmetric(vertical: 16.h),

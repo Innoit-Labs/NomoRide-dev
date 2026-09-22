@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:nomoride/core/config/api_config.dart';
 import 'package:nomoride/core/network/api_exception.dart';
+import 'package:nomoride/core/network/session_guard.dart';
 import 'package:nomoride/core/services/auth_session.dart';
 import 'package:nomoride/features/home/data/models/dp_order.dart';
 import 'package:nomoride/features/orders/data/models/my_orders_data.dart';
@@ -51,6 +52,7 @@ class MyOrdersRepository {
       );
 
       _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;
 
@@ -112,8 +114,7 @@ class MyOrdersRepository {
   }
 
   void _ensureLoggedIn() {
-    final token = AuthSession.authToken?.trim();
-    if (token == null || token.isEmpty) {
+    if (!AuthSession.hasValidSession) {
       throw const ApiException('Please login to view orders.');
     }
   }

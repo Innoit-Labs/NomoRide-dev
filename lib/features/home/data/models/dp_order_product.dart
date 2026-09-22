@@ -1,18 +1,20 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 
-class DpOrderGarment {
-  const DpOrderGarment({
+import 'package:nomoride/features/home/data/models/order_item_section.dart';
+
+class DpOrderGarment {  const DpOrderGarment({
     this.name,
     this.size,
     this.quantity,
     this.imageUrl,
+    this.isNonReturnable = false,
   });
 
   final String? name;
   final String? size;
   final int? quantity;
   final String? imageUrl;
+  final bool isNonReturnable;
 
   String get displayName {
     final text = name?.trim();
@@ -40,12 +42,14 @@ class DpOrderGarment {
     String? size,
     int? quantity,
     String? imageUrl,
+    bool? isNonReturnable,
   }) {
     return DpOrderGarment(
       name: name ?? this.name,
       size: size ?? this.size,
       quantity: quantity ?? this.quantity,
       imageUrl: imageUrl ?? this.imageUrl,
+      isNonReturnable: isNonReturnable ?? this.isNonReturnable,
     );
   }
 
@@ -87,83 +91,36 @@ class DpOrderGarment {
     return [for (final key in order) merged[key]!];
   }
 
+  /// Sum of garment quantities (merged by name + size).
+  static int totalQuantity(Iterable<DpOrderGarment> items) {
+    var total = 0;
+    for (final item in items) {
+      final qty = item.quantity;
+      total += (qty != null && qty > 0) ? qty : 1;
+    }
+    return total;
+  }
+
   factory DpOrderGarment.fromJson(Map<String, dynamic> json) {
     return DpOrderGarment(
-      name: _readString(
-        json['name'] ??
-            json['garment_name'] ??
-            json['garmentName'] ??
-            json['product_name'] ??
-            json['productName'] ??
-            json['title'] ??
-            json['item_name'] ??
-            json['itemName'],
-      ),
-      size: _readString(
-        json['size'] ?? json['garment_size'] ?? json['garmentSize'],
-      ),
-      quantity: _readInt(json['quantity'] ?? json['qty'] ?? json['count']),
-      imageUrl: _readImageUrl(json),
+      name: _readString(json['product_name']),
+      size: _readString(json['size']),
+      quantity: _readInt(json['quantity']),
+      imageUrl: _readString(json['primary_image_url']),
     );
   }
 
   static List<DpOrderGarment> listFromJson(dynamic raw) {
     if (raw is! List) return const [];
     return raw
-        .map((item) {
-          if (item is Map) {
-            return DpOrderGarment.fromJson(
-              item.map((key, value) => MapEntry(key.toString(), value)),
-            );
-          }
-          if (item is String) {
-            final text = item.trim();
-            if (text.isEmpty) return null;
-            if (text.startsWith('http')) {
-              return DpOrderGarment(imageUrl: text);
-            }
-            return DpOrderGarment(name: text);
-          }
-          return null;
-        })
-        .whereType<DpOrderGarment>()
-        .where(
-          (g) =>
-              (g.name?.trim().isNotEmpty == true) ||
-              (g.imageUrl?.trim().isNotEmpty == true),
+        .whereType<Map>()
+        .map(
+          (item) => DpOrderGarment.fromJson(
+            item.map((key, value) => MapEntry(key.toString(), value)),
+          ),
         )
+        .where((g) => g.name?.trim().isNotEmpty == true)
         .toList();
-  }
-
-  static String? _readImageUrl(Map<String, dynamic> json) {
-    final candidates = [
-      json['primary_image_url'],
-      json['primaryImageUrl'],
-      json['image'],
-      json['image_url'],
-      json['imageUrl'],
-      json['thumbnail'],
-      json['thumbnail_url'],
-      json['thumbnailUrl'],
-      json['url'],
-      json['src'],
-    ];
-    for (final value in candidates) {
-      final text = value?.toString().trim();
-      if (text != null && text.isNotEmpty && text != 'null') return text;
-    }
-    final images = json['images'];
-    if (images is List && images.isNotEmpty) {
-      final first = images.first;
-      if (first is Map) {
-        return _readImageUrl(
-          first.map((key, value) => MapEntry(key.toString(), value)),
-        );
-      }
-      final text = first?.toString().trim();
-      if (text != null && text.isNotEmpty && text != 'null') return text;
-    }
-    return null;
   }
 
   static String? _readString(dynamic value) {
@@ -195,42 +152,31 @@ class DpOrderGarment {
 class DpOrderProduct {
   const DpOrderProduct({
     this.name,
-    this.durationDays,
-    this.durationLabel,
-    this.garmentCount,
+    this.kitType,
     this.quantity,
-    this.imageUrls = const [],
     this.garments = const [],
+    this.sectionType,
   });
 
   final String? name;
-  final int? durationDays;
-  final String? durationLabel;
-  final int? garmentCount;
+  final String? kitType;
   final int? quantity;
-  final List<String> imageUrls;
   final List<DpOrderGarment> garments;
+  final OrderItemSectionType? sectionType;
 
-  /// e.g. "1 Day Wardrobe Kit" when duration + name are available.
+  bool get isKidsEssentialsSection =>
+      sectionType == OrderItemSectionType.kidsEssentials;
+
+  /// Wardrobe kit header from `kitDetails.kit_type`; otherwise `productName`.
   String? get displayTitle {
+    final kitTypeLabel = kitType?.trim();
+    if (kitTypeLabel != null && kitTypeLabel.isNotEmpty) {
+      return kitTypeLabel;
+    }
+
     final productName = name?.trim();
     if (productName == null || productName.isEmpty) return null;
-
-    final lower = productName.toLowerCase();
-    final hasDayPrefix = RegExp(r'^\d+\s*day').hasMatch(lower);
-    if (hasDayPrefix) return _titleCase(productName);
-
-    if (durationDays != null && durationDays! > 0) {
-      final dayWord = durationDays == 1 ? 'Day' : 'Days';
-      return '${durationDays!} $dayWord ${_titleCase(productName)}';
-    }
-
-    final label = durationLabel?.trim();
-    if (label != null && label.isNotEmpty) {
-      return '${_titleCase(label)} ${_titleCase(productName)}';
-    }
-
-    return _titleCase(productName);
+    return productName;
   }
 
   String? get garmentCountLabel {
@@ -240,71 +186,54 @@ class DpOrderProduct {
   }
 
   int? get effectiveGarmentCount {
-    if (garmentCount != null) return garmentCount;
-    if (garments.isNotEmpty) return garments.length;
-    if (imageUrls.length > 1) return imageUrls.length;
-    return null;
+    final items = expandableItems;
+    if (items.isEmpty) return null;
+    final total = DpOrderGarment.totalQuantity(items);
+    return total > 0 ? total : null;
   }
 
   /// Items shown in the expanded dropdown list (duplicates merged by qty).
   List<DpOrderGarment> get expandableItems {
-    if (garments.isNotEmpty) {
-      return DpOrderGarment.mergeDuplicates(garments);
-    }
-    if (imageUrls.length > 1) {
-      return DpOrderGarment.mergeDuplicates([
-        for (var i = 0; i < imageUrls.length; i++)
-          DpOrderGarment(
-            name: 'Garment ${i + 1}',
-            imageUrl: imageUrls[i],
-            quantity: 1,
-          ),
-      ]);
-    }
-    return const [];
+    if (garments.isEmpty) return const [];
+    return DpOrderGarment.mergeDuplicates(garments);
   }
 
   bool get canExpand => expandableItems.isNotEmpty;
 
-  factory DpOrderProduct.fromJson(Map<String, dynamic> json) {
-    final durationRaw = json['duration_days'] ??
-        json['durationDays'] ??
-        json['rental_days'] ??
-        json['rentalDays'] ??
-        json['days'] ??
-        json['duration'];
+  /// Images for the kit header thumbnail grid (garment images first, up to 4).
+  List<String> get previewImageUrls {
+    final urls = <String>[];
 
-    final imageUrls = _readImageUrls(json);
-    final garments = _readGarments(json);
+    for (final garment in garments) {
+      final text = garment.imageUrl?.trim();
+      if (text == null || text.isEmpty) continue;
+      if (!urls.contains(text)) urls.add(text);
+      if (urls.length >= 4) break;
+    }
+
+    return urls;
+  }
+
+  bool get showPreviewGrid =>
+      previewImageUrls.length > 1 || garments.length > 1;
+
+  factory DpOrderProduct.fromJson(Map<String, dynamic> json) {
+    final kitDetails = _parseKitDetailsMap(json);
+    final sectionType = OrderItemClassifier.classify(json, kitDetails);
+    final garments = _readGarments(kitDetails);
+    final markedGarments = sectionType == OrderItemSectionType.kidsEssentials
+        ? [
+            for (final garment in garments)
+              garment.copyWith(isNonReturnable: true),
+          ]
+        : garments;
 
     return DpOrderProduct(
-      name: _readString(
-        json['name'] ??
-            json['product_name'] ??
-            json['productName'] ??
-            json['title'] ??
-            json['package_type'] ??
-            json['packageType'] ??
-            json['item_name'] ??
-            json['itemName'],
-      ),
-      durationDays: _readInt(durationRaw),
-      durationLabel: _readDurationLabel(durationRaw, json),
-      garmentCount: _readInt(
-        json['garment_count'] ??
-            json['garmentCount'] ??
-            json['no_of_garments'] ??
-            json['noOfGarments'] ??
-            json['garments_count'] ??
-            json['garmentsCount'] ??
-            json['total_garments'] ??
-            json['totalGarments'],
-      ),
-      quantity: _readInt(
-        json['quantity'] ?? json['qty'] ?? json['count'],
-      ),
-      imageUrls: imageUrls,
-      garments: garments,
+      name: _readString(json['productName']),
+      kitType: _readString(kitDetails?['kit_type']),
+      quantity: _readInt(json['quantity']),
+      garments: markedGarments,
+      sectionType: sectionType,
     );
   }
 
@@ -317,146 +246,46 @@ class DpOrderProduct {
             ))
         .where((product) =>
             (product.name?.trim().isNotEmpty == true) ||
-            product.imageUrls.isNotEmpty ||
-            product.garments.isNotEmpty ||
-            product.garmentCount != null ||
-            product.durationDays != null)
+            (product.kitType?.trim().isNotEmpty == true) ||
+            product.garments.isNotEmpty)
         .toList();
   }
 
-  static List<DpOrderGarment> _readGarments(Map<String, dynamic> json) {
-    var kitDetailsRaw = json['kitDetails'] ?? json['kit_details'];
-    if (kitDetailsRaw != null) {
-      debugPrint('[ORDER DEBUG] kitDetails found');
-      Map<String, dynamic>? kitDetailsMap;
-      if (kitDetailsRaw is Map) {
-        kitDetailsMap = kitDetailsRaw.map((k, v) => MapEntry(k.toString(), v));
-      } else if (kitDetailsRaw is String) {
-        try {
-          final decoded = jsonDecode(kitDetailsRaw);
-          if (decoded is Map) {
-            kitDetailsMap = decoded.map((k, v) => MapEntry(k.toString(), v));
-          }
-        } catch (_) {}
-      }
+  static List<DpOrderGarment> _readGarments(Map<String, dynamic>? kitDetails) {
+    if (kitDetails == null) return const [];
 
-      if (kitDetailsMap != null) {
-        var selectedItemsRaw = kitDetailsMap['selectedItems'] ?? kitDetailsMap['selected_items'];
-        if (selectedItemsRaw != null) {
-          List? selectedList;
-          if (selectedItemsRaw is List) {
-            selectedList = selectedItemsRaw;
-          } else if (selectedItemsRaw is String) {
-            try {
-              final decoded = jsonDecode(selectedItemsRaw);
-              if (decoded is List) {
-                selectedList = decoded;
-              }
-            } catch (_) {}
-          }
-
-          if (selectedList != null && selectedList.isNotEmpty) {
-            debugPrint('[ORDER DEBUG] selectedItems count: ${selectedList.length}');
-            final List<DpOrderGarment> list = [];
-            for (final item in selectedList) {
-              if (item is Map) {
-                final garmentMap = item.map((k, v) => MapEntry(k.toString(), v));
-                final g = DpOrderGarment.fromJson(garmentMap);
-                if (g.name != null && g.name!.isNotEmpty) {
-                  debugPrint('[ORDER DEBUG] Mapping garment: ${g.name}');
-                  list.add(g);
-                }
-              }
-            }
-            if (list.isNotEmpty) {
-              return list;
-            }
-          }
-        }
-      }
+    final selectedItemsRaw = kitDetails['selectedItems'];
+    if (selectedItemsRaw is! List || selectedItemsRaw.isEmpty) {
+      return const [];
     }
 
-    final candidates = [
-      json['garments'],
-      json['garment_list'],
-      json['garmentList'],
-      json['items'],
-      json['product_items'],
-      json['productItems'],
-      json['line_items'],
-      json['lineItems'],
-      json['variants'],
-    ];
-
-    for (final candidate in candidates) {
-      final list = DpOrderGarment.listFromJson(candidate);
-      if (list.isNotEmpty) return list;
+    final garments = <DpOrderGarment>[];
+    for (final item in selectedItemsRaw) {
+      if (item is! Map) continue;
+      final garment = DpOrderGarment.fromJson(
+        item.map((key, value) => MapEntry(key.toString(), value)),
+      );
+      if (garment.name?.trim().isNotEmpty == true) {
+        garments.add(garment);
+      }
     }
-    return const [];
+    return garments;
   }
 
-  static String? _readDurationLabel(
-    dynamic durationRaw,
-    Map<String, dynamic> json,
-  ) {
-    final labeled = _readString(
-      json['duration_label'] ??
-          json['durationLabel'] ??
-          json['rental_duration'] ??
-          json['rentalDuration'],
-    );
-    if (labeled != null) return labeled;
-
-    if (durationRaw is String) {
-      final text = durationRaw.trim();
-      if (text.isEmpty) return null;
-      if (int.tryParse(text) != null) return null;
-      return text;
+  static Map<String, dynamic>? _parseKitDetailsMap(Map<String, dynamic> json) {
+    final raw = json['kitDetails'];
+    if (raw is Map) {
+      return raw.map((key, value) => MapEntry(key.toString(), value));
+    }
+    if (raw is String) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          return decoded.map((key, value) => MapEntry(key.toString(), value));
+        }
+      } catch (_) {}
     }
     return null;
-  }
-
-  static List<String> _readImageUrls(Map<String, dynamic> json) {
-    final urls = <String>[];
-
-    void add(dynamic value) {
-      if (value == null) return;
-      if (value is List) {
-        for (final item in value) {
-          add(item);
-        }
-        return;
-      }
-      if (value is Map) {
-        add(
-          value['url'] ??
-              value['image'] ??
-              value['image_url'] ??
-              value['imageUrl'] ??
-              value['src'],
-        );
-        return;
-      }
-      final text = value.toString().trim();
-      if (text.isEmpty || text == 'null') return;
-      if (!urls.contains(text)) urls.add(text);
-    }
-
-    add(json['images']);
-    add(json['image_urls']);
-    add(json['imageUrls']);
-    add(json['product_images']);
-    add(json['productImages']);
-    add(json['garment_images']);
-    add(json['garmentImages']);
-    add(json['image']);
-    add(json['image_url']);
-    add(json['imageUrl']);
-    add(json['thumbnail']);
-    add(json['thumbnail_url']);
-    add(json['thumbnailUrl']);
-
-    return urls;
   }
 
   static String? _readString(dynamic value) {
@@ -475,17 +304,5 @@ class DpOrderProduct {
     if (asInt != null) return asInt;
     final match = RegExp(r'(\d+)').firstMatch(text);
     return match != null ? int.tryParse(match.group(1)!) : null;
-  }
-
-  static String _titleCase(String value) {
-    return value
-        .replaceAll('_', ' ')
-        .split(RegExp(r'\s+'))
-        .where((word) => word.isNotEmpty)
-        .map(
-          (word) =>
-              '${word[0].toUpperCase()}${word.substring(1).toLowerCase()}',
-        )
-        .join(' ');
   }
 }

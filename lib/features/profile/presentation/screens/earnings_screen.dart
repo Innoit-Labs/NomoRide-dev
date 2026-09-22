@@ -36,13 +36,16 @@ class _EarningsScreenState extends State<EarningsScreen> {
     _loadEarnings();
   }
 
-  Future<void> _loadEarnings() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
+  Future<void> _loadEarnings({bool showLoader = true}) async {
+    if (showLoader) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+    }
 
     try {
+      // Earnings only — do not mix with withdrawal-requests on load.
       final dataFuture = _repository.getEarnings();
       final profileFuture = _profileRepository.getProfile().then(
         (_) {},
@@ -54,7 +57,9 @@ class _EarningsScreenState extends State<EarningsScreen> {
       setState(() {
         _earnings = data;
         _selectedOrderIds.removeWhere(
-          (id) => !data.orders.any((order) => order.id == id),
+          (id) => !data.orders.any(
+            (order) => order.id == id && order.canWithdraw,
+          ),
         );
       });
     } catch (error) {
@@ -64,7 +69,15 @@ class _EarningsScreenState extends State<EarningsScreen> {
             error is ApiException ? error.message : error.toString();
       });
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted && showLoader) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _refreshWithdrawalHistory() async {
+    try {
+      await _repository.getWithdrawalRequests();
+    } catch (_) {
+      // Earnings refresh remains the source of truth for balances/status.
     }
   }
 
@@ -433,9 +446,14 @@ class _EarningsScreenState extends State<EarningsScreen> {
 
   Widget _buildOrderCard(EarningOrder order, bool showCheckbox) {
     final status = order.displayPaymentStatus;
-    final statusColor = order.isPaymentCompleted
-        ? Colors.green
-        : const Color(0xFFE7A938);
+    final Color statusColor;
+    if (order.isPaymentCompleted) {
+      statusColor = Colors.green;
+    } else if (order.isWithdrawalRequested) {
+      statusColor = const Color(0xFF90CAF9);
+    } else {
+      statusColor = const Color(0xFFE7A938);
+    }
 
     return Container(
       padding: EdgeInsets.all(16.w),
@@ -633,43 +651,118 @@ class _EarningsScreenState extends State<EarningsScreen> {
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return;
 
+    final availableBalance = _earnings?.availableBalance ?? 0;
     final result = await showDialog<_WithdrawFormResult>(
       context: context,
       barrierDismissible: false,
       builder: (_) => _WithdrawDialog(
         profile: paymentProfile,
         initialAmount: _formatAmount(_selectedAmount),
+        availableBalance: availableBalance,
+        selectedOrderAmount: _selectedAmount,
       ),
     );
 
     if (result == null || !mounted) return;
-    await _submitWithdrawal(result, paymentProfile);
+    await _submitWithdrawal(result);
   }
 
-  Future<void> _submitWithdrawal(
-    _WithdrawFormResult result,
-    DeliveryPartnerProfile profile,
-  ) async {
+  Future<void> _submitWithdrawal(_WithdrawFormResult result) async {
+    if (_isSubmittingWithdrawal) return;
+
+    final selectedIds = _selectedOrderIds.toList(growable: false);
+    if (selectedIds.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select at least one order')),
+      );
+      return;
+    }
+
+    final availableBalance = _earnings?.availableBalance ?? 0;
+    final selectedSum = _selectedAmount;
+
+    // Backend requires order_id(s) for order-based withdrawals.
+    // Never drop selected order IDs due to float/amount formatting mismatches.
+    // Amount-only mode is only used when no orders are selected.
+    if (result.amount <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Amount must be greater than 0.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final hasSelectedOrders = selectedIds.isNotEmpty;
+    final isAmountOnly = !hasSelectedOrders;
+    if (isAmountOnly && result.amount > availableBalance) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Amount cannot exceed available balance (₹${_formatAmount(availableBalance)}).',
+          ),
+          backgroundColor: Colors.red.shade800,
+        ),
+      );
+      return;
+    }
+
+    // If user edited amount while orders are selected, keep order_ids and
+    // ignore amount-only mode (backend: "Order id's is required").
+    if (hasSelectedOrders && (result.amount - selectedSum).abs() > 0.009) {
+      debugPrint(
+        'Withdraw: amount differs from selected order total '
+        '(${result.amount} vs $selectedSum). Sending order_id(s), not amount-only.',
+      );
+    }
+
     setState(() => _isSubmittingWithdrawal = true);
     try {
-      await _repository.createWithdrawalRequest(
-        amount: result.amount,
-        payTo: result.payTo,
-        notes: result.notes,
-        upiId: result.payTo == 'upi' ? profile.upiId?.trim() : null,
-        bankAccountNumber:
-            result.payTo == 'bank' ? profile.bankAccountNumber?.trim() : null,
-        bankIfsc: result.payTo == 'bank' ? profile.bankIfsc?.trim() : null,
-        bankAccountName:
-            result.payTo == 'bank' ? profile.bankAccountName?.trim() : null,
-      );
+      if (selectedIds.isNotEmpty) {
+        await _repository.createWithdrawalRequest(
+          payTo: result.payTo,
+          notes: result.notes,
+          orderIds: selectedIds,
+        );
+      } else {
+        await _repository.createWithdrawalRequest(
+          payTo: result.payTo,
+          notes: result.notes,
+          amount: result.amount,
+        );
+      }
 
       if (!mounted) return;
-      setState(() {
-        _selectedOrderIds.clear();
-        _activeTab = 'All';
-      });
-      await _loadEarnings();
+
+      // Mark selected orders as requested immediately, then refresh from API.
+      final current = _earnings;
+      if (current != null) {
+        setState(() {
+          _earnings = EarningsData(
+            totalEarnings: current.totalEarnings,
+            paidOut: current.paidOut,
+            pending: current.pending,
+            availableBalance: current.availableBalance,
+            orders: [
+              for (final order in current.orders)
+                selectedIds.contains(order.id)
+                    ? order.copyWith(paymentStatus: 'requested')
+                    : order,
+            ],
+          );
+          _selectedOrderIds.clear();
+          _activeTab = 'All';
+        });
+      } else {
+        setState(() {
+          _selectedOrderIds.clear();
+          _activeTab = 'All';
+        });
+      }
+
+      await _loadEarnings(showLoader: false);
+      await _refreshWithdrawalHistory();
       if (!mounted) return;
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted) return;
@@ -756,10 +849,14 @@ class _WithdrawDialog extends StatefulWidget {
   const _WithdrawDialog({
     required this.profile,
     required this.initialAmount,
+    required this.availableBalance,
+    required this.selectedOrderAmount,
   });
 
   final DeliveryPartnerProfile profile;
   final String initialAmount;
+  final double availableBalance;
+  final double selectedOrderAmount;
 
   @override
   State<_WithdrawDialog> createState() => _WithdrawDialogState();
@@ -786,12 +883,30 @@ class _WithdrawDialogState extends State<_WithdrawDialog> {
     super.dispose();
   }
 
+  String _formatAmount(double value) {
+    if (value == value.roundToDouble()) {
+      return value.toInt().toString();
+    }
+    return value.toStringAsFixed(2);
+  }
+
   void _submit() {
     final amount = double.tryParse(_amountController.text.trim());
     if (amount == null || amount <= 0) {
-      setState(() => _errorMessage = 'Enter a valid amount.');
+      setState(() => _errorMessage = 'Amount must be greater than 0.');
       return;
     }
+
+    final isCustomAmount =
+        (amount - widget.selectedOrderAmount).abs() > 0.009;
+    if (isCustomAmount && amount > widget.availableBalance) {
+      setState(() {
+        _errorMessage =
+            'Amount cannot exceed available balance (₹${_formatAmount(widget.availableBalance)}).';
+      });
+      return;
+    }
+
     if (_payTo == 'upi' && !widget.profile.hasUpiDetails) {
       setState(() => _errorMessage = 'UPI details not configured.');
       return;
@@ -838,7 +953,16 @@ class _WithdrawDialogState extends State<_WithdrawDialog> {
             _buildField(
               'Amount *',
               _amountController,
-              keyboardType: TextInputType.number,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+            ),
+            SizedBox(height: 6.h),
+            Text(
+              'Available balance: ₹${_formatAmount(widget.availableBalance)}',
+              style: CustomTextStyles.openSansRegular.copyWith(
+                fontSize: 11.fSize,
+                color: AppColours.hintcolor,
+              ),
             ),
             SizedBox(height: 12.h),
             Text(

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:nomoride/core/config/api_config.dart';
 import 'package:nomoride/core/network/api_exception.dart';
+import 'package:nomoride/core/network/session_guard.dart';
 import 'package:nomoride/core/services/auth_session.dart';
 import 'package:nomoride/features/profile/data/models/earnings_data.dart';
 import 'package:nomoride/features/profile/data/models/withdrawal_request.dart';
@@ -14,10 +15,17 @@ class EarningsRepository {
 
   final http.Client _client;
 
+  /// GET /mobile/v1/delivery_partners/earnings
+  /// Auth Bearer only — no body, no query, no order_ids.
   Future<EarningsData> getEarnings() async {
     _ensureLoggedIn();
     final uri = ApiConfig.earningsUri;
-    _logRequest('GET', uri);
+    _logEarningsRequest(
+      method: 'GET',
+      uri: uri,
+      queryParameters: uri.queryParameters,
+      body: null,
+    );
 
     try {
       final response = await _client.get(
@@ -28,20 +36,23 @@ class EarningsRepository {
         },
       );
 
-      _logResponse(response.statusCode, response.body);
+      _logEarningsResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;
 
       if (response.statusCode == 200 && success) {
         final data = json?['data'];
-        if (data is Map<String, dynamic>) {
-          return EarningsData.fromJson(data);
+        if (data is Map) {
+          // Parse off the UI isolate to reduce main-thread frame drops.
+          final map = data.map((key, value) => MapEntry(key.toString(), value));
+          return await compute(_parseEarningsData, map);
         }
         throw const ApiException('Invalid earnings response from server.');
       }
 
       throw ApiException(
-        json?['message'] as String? ??
+        json?['message']?.toString() ??
             'Failed to load earnings (${response.statusCode})',
         statusCode: response.statusCode,
       );
@@ -49,15 +60,22 @@ class EarningsRepository {
       rethrow;
     } on SocketException {
       throw const ApiException('No internet connection. Please try again.');
-    } catch (_) {
+    } catch (error) {
+      if (error is ApiException) rethrow;
       throw const ApiException('Something went wrong. Please try again.');
     }
   }
 
+  /// GET /mobile/v1/delivery_partners/withdrawal-requests
   Future<List<WithdrawalRequest>> getWithdrawalRequests() async {
     _ensureLoggedIn();
     final uri = ApiConfig.withdrawalRequestsUri;
-    _logRequest('GET', uri);
+    _logWithdrawalRequest(
+      method: 'GET',
+      uri: uri,
+      queryParameters: uri.queryParameters,
+      body: null,
+    );
 
     try {
       final response = await _client.get(
@@ -68,7 +86,8 @@ class EarningsRepository {
         },
       );
 
-      _logResponse(response.statusCode, response.body);
+      _logWithdrawalResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;
 
@@ -76,17 +95,26 @@ class EarningsRepository {
         final data = json?['data'];
         if (data is List) {
           return data
-              .whereType<Map<String, dynamic>>()
-              .map(WithdrawalRequest.fromJson)
+              .whereType<Map>()
+              .map(
+                (item) => WithdrawalRequest.fromJson(
+                  item.map((key, value) => MapEntry(key.toString(), value)),
+                ),
+              )
               .where((item) => item.id.isNotEmpty)
               .toList();
         }
-        if (data is Map<String, dynamic>) {
-          final items = data['requests'] ?? data['withdrawals'];
+        if (data is Map) {
+          final map = data.map((key, value) => MapEntry(key.toString(), value));
+          final items = map['requests'] ?? map['withdrawals'];
           if (items is List) {
             return items
-                .whereType<Map<String, dynamic>>()
-                .map(WithdrawalRequest.fromJson)
+                .whereType<Map>()
+                .map(
+                  (item) => WithdrawalRequest.fromJson(
+                    item.map((key, value) => MapEntry(key.toString(), value)),
+                  ),
+                )
                 .where((item) => item.id.isNotEmpty)
                 .toList();
           }
@@ -95,7 +123,7 @@ class EarningsRepository {
       }
 
       throw ApiException(
-        json?['message'] as String? ??
+        json?['message']?.toString() ??
             'Failed to load withdrawal requests (${response.statusCode})',
         statusCode: response.statusCode,
       );
@@ -108,36 +136,67 @@ class EarningsRepository {
     }
   }
 
+  /// POST /mobile/v1/delivery_partners/withdrawal-requests
+  ///
+  /// Backend validates `order_ids` (array). Singular `order_id` is ignored by
+  /// the live API and returns: "Order id's is required".
+  ///
+  /// Modes:
+  /// - order-based: `{ order_ids: [...], pay_to, notes }`
+  /// - custom amount: `{ amount, pay_to, notes }`
   Future<WithdrawalRequest> createWithdrawalRequest({
-    required double amount,
     required String payTo,
     String? notes,
-    String? upiId,
-    String? bankAccountNumber,
-    String? bankIfsc,
-    String? bankAccountName,
+    String? orderId,
+    List<String>? orderIds,
+    double? amount,
   }) async {
     _ensureLoggedIn();
 
     final normalizedPayTo = payTo.trim().toLowerCase();
+    if (normalizedPayTo != 'bank' && normalizedPayTo != 'upi') {
+      throw const ApiException('pay_to must be bank or upi.');
+    }
+
+    final cleanedOrderIds = <String>[
+      if (orderId != null && orderId.trim().isNotEmpty) orderId.trim(),
+      ...?(orderIds
+          ?.map((id) => id.trim())
+          .where((id) => id.isNotEmpty)),
+    ];
+    // Preserve order, drop duplicates.
+    final uniqueOrderIds = <String>[];
+    for (final id in cleanedOrderIds) {
+      if (!uniqueOrderIds.contains(id)) uniqueOrderIds.add(id);
+    }
 
     final payload = <String, dynamic>{
-      'amount': amount,
       'pay_to': normalizedPayTo,
       if (notes != null && notes.trim().isNotEmpty) 'notes': notes.trim(),
     };
 
-    if (normalizedPayTo == 'upi') {
-      payload['upi_id'] = upiId?.trim();
-    } else if (normalizedPayTo == 'bank') {
-      payload['bank_account_number'] = bankAccountNumber?.trim();
-      payload['bank_ifsc'] = bankIfsc?.trim();
-      payload['bank_account_name'] = bankAccountName?.trim();
+    if (uniqueOrderIds.isNotEmpty) {
+      // Always send plural `order_ids` — including for a single order.
+      payload['order_ids'] = uniqueOrderIds;
+    } else if (amount != null) {
+      if (amount <= 0) {
+        throw const ApiException('Amount must be greater than 0.');
+      }
+      payload['amount'] = amount;
+    } else {
+      throw const ApiException(
+        'Provide order_ids or amount for withdrawal.',
+      );
     }
 
     final uri = ApiConfig.withdrawalRequestsUri;
     final body = jsonEncode(payload);
-    _logRequest('POST', uri, body: body);
+    _logWithdrawalRequest(
+      method: 'POST',
+      uri: uri,
+      queryParameters: uri.queryParameters,
+      body: body,
+    );
 
     try {
       final response = await _client.post(
@@ -150,27 +209,33 @@ class EarningsRepository {
         body: body,
       );
 
-      _logResponse(response.statusCode, response.body);
+      _logWithdrawalResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;
 
       if ((response.statusCode == 200 || response.statusCode == 201) &&
           success) {
         final data = json?['data'];
-        if (data is Map<String, dynamic>) {
-          return WithdrawalRequest.fromJson(data);
+        if (data is Map) {
+          return WithdrawalRequest.fromJson(
+            data.map((key, value) => MapEntry(key.toString(), value)),
+          );
         }
         return WithdrawalRequest(
-          id: json?['reference_id']?.toString() ?? '',
-          amount: amount,
+          id: json?['data']?.toString() ??
+              json?['reference_id']?.toString() ??
+              '',
+          amount: amount ?? 0,
           status: 'pending',
-          payTo: payTo,
+          payTo: normalizedPayTo,
           notes: notes,
+          orderIds: uniqueOrderIds,
         );
       }
 
       throw ApiException(
-        json?['message'] as String? ??
+        json?['message']?.toString() ??
             'Failed to submit withdrawal (${response.statusCode})',
         statusCode: response.statusCode,
       );
@@ -184,8 +249,7 @@ class EarningsRepository {
   }
 
   void _ensureLoggedIn() {
-    final token = AuthSession.authToken?.trim();
-    if (token == null || token.isEmpty) {
+    if (!AuthSession.hasValidSession) {
       throw const ApiException('Please login to view earnings.');
     }
   }
@@ -195,21 +259,60 @@ class EarningsRepository {
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map<String, dynamic>) return decoded;
+      if (decoded is Map) {
+        return decoded.map((key, value) => MapEntry(key.toString(), value));
+      }
     } catch (_) {}
     return null;
   }
 
-  void _logRequest(String method, Uri uri, {String? body}) {
+  void _logEarningsRequest({
+    required String method,
+    required Uri uri,
+    required Map<String, String> queryParameters,
+    required String? body,
+  }) {
     debugPrint('========== EARNINGS API REQUEST ==========');
-    debugPrint('$method: $uri');
-    if (body != null) debugPrint('Body: $body');
+    debugPrint('Method: $method');
+    debugPrint('URL: $uri');
+    debugPrint(
+      'Query Parameters: ${queryParameters.isEmpty ? '(none)' : queryParameters}',
+    );
+    debugPrint('Body: ${body ?? '(none)'}');
     debugPrint('==========================================');
   }
 
-  void _logResponse(int statusCode, String body) {
+  void _logEarningsResponse(int statusCode, String body) {
     debugPrint('========== EARNINGS API RESPONSE ==========');
     debugPrint('Status: $statusCode');
     debugPrint('Body: $body');
     debugPrint('===========================================');
   }
+
+  void _logWithdrawalRequest({
+    required String method,
+    required Uri uri,
+    required Map<String, String> queryParameters,
+    required String? body,
+  }) {
+    debugPrint('========== WITHDRAWAL API REQUEST ==========');
+    debugPrint('Method: $method');
+    debugPrint('URL: $uri');
+    debugPrint(
+      'Query Parameters: ${queryParameters.isEmpty ? '(none)' : queryParameters}',
+    );
+    debugPrint('Body: ${body ?? '(none)'}');
+    debugPrint('============================================');
+  }
+
+  void _logWithdrawalResponse(int statusCode, String body) {
+    debugPrint('========== WITHDRAWAL API RESPONSE ==========');
+    debugPrint('Status: $statusCode');
+    debugPrint('Body: $body');
+    debugPrint('=============================================');
+  }
+}
+
+EarningsData _parseEarningsData(Map<String, dynamic> json) {
+  return EarningsData.fromJson(json);
 }

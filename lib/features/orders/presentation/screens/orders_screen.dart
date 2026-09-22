@@ -27,7 +27,7 @@ class _OrdersScreenState extends State<OrdersScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
     _loadOrders();
   }
 
@@ -73,11 +73,24 @@ class _OrdersScreenState extends State<OrdersScreen>
       case 'Completed':
         return all.where(_isCompletedOrder).toList();
       case 'In Transit':
-        return all.where((order) => !_isCompletedOrder(order)).toList();
+        return all
+            .where((order) =>
+                !_isCompletedOrder(order) && !order.isNotDelivered)
+            .toList();
+      case 'Not Delivered':
+        return all
+            .where((order) => order.isNotDelivered && !order.isReturnFlow)
+            .toList();
+      case 'Pickup Failed':
+        return all
+            .where((order) => order.isNotDelivered && order.isReturnFlow)
+            .toList();
       default:
         return all;
     }
   }
+
+  bool _isNotDeliveredOrder(DpOrder order) => order.isNotDelivered;
 
   bool _isCompletedOrder(DpOrder order) {
     final status = order.status.toLowerCase().trim();
@@ -87,6 +100,9 @@ class _OrdersScreenState extends State<OrdersScreen>
   }
 
   String _myOrdersStatusLabel(DpOrder order) {
+    if (order.isNotDelivered) {
+      return order.isReturnFlow ? 'Pickup Failed' : 'Not Delivered';
+    }
     return _isCompletedOrder(order) ? 'Completed' : 'In Transit';
   }
 
@@ -144,6 +160,8 @@ class _OrdersScreenState extends State<OrdersScreen>
                       _buildOrderList('All'),
                       _buildOrderList('Completed'),
                       _buildOrderList('In Transit'),
+                      _buildOrderList('Not Delivered'),
+                      _buildOrderList('Pickup Failed'),
                     ],
                   ),
                 if (_isLoading)
@@ -193,44 +211,57 @@ class _OrdersScreenState extends State<OrdersScreen>
   }
 
   Widget _buildTabBar() {
-    return Container(
-      height: 48.h,
-      margin: EdgeInsets.symmetric(horizontal: 16.w),
-      padding: EdgeInsets.all(8.w),
-      decoration: BoxDecoration(
-        color: Colors.black87,
-        borderRadius: BorderRadius.circular(30),
-        border: Border.all(
-          color: const Color(0xFFE6C279),
-          width: 1.2,
-        ),
-      ),
+    return SizedBox(
+      height: 42.h,
       child: TabBar(
         controller: _tabController,
+        isScrollable: true,
+        tabAlignment: TabAlignment.start,
+        padding: EdgeInsets.symmetric(horizontal: 16.w),
+        labelPadding: EdgeInsets.symmetric(horizontal: 5.w),
         indicator: BoxDecoration(
           color: const Color(0xFF3A3225),
-          borderRadius: BorderRadius.circular(24),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: const Color(0xFFE6C279),
+            width: 1.2,
+          ),
         ),
         indicatorSize: TabBarIndicatorSize.tab,
         dividerColor: Colors.transparent,
         labelColor: const Color(0xFFF5E6C8),
-        unselectedLabelColor: Colors.white38,
-        labelStyle: const TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w700,
+        unselectedLabelColor: Colors.white60,
+        labelStyle: CustomTextStyles.montserratBold.copyWith(
+          fontSize: 13.fSize,
         ),
-        unselectedLabelStyle: const TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w600,
+        unselectedLabelStyle: CustomTextStyles.openSansSemiBold.copyWith(
+          fontSize: 13.fSize,
         ),
         splashFactory: NoSplash.splashFactory,
         overlayColor: WidgetStateProperty.all(Colors.transparent),
-        tabs: const [
-          Tab(text: 'All'),
-          Tab(text: 'Completed'),
-          Tab(text: 'In Transit'),
+        tabs: [
+          _buildTabPill('All'),
+          _buildTabPill('Completed'),
+          _buildTabPill('In Transit'),
+          _buildTabPill('Not Delivered'),
+          _buildTabPill('Pickup Failed'),
         ],
       ),
+    );
+  }
+
+  Widget _buildTabPill(String label) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 14.w, vertical: 8.h),
+      decoration: BoxDecoration(
+        color: const Color(0xFF141419),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.white12,
+          width: 1,
+        ),
+      ),
+      child: Text(label),
     );
   }
 
@@ -268,7 +299,8 @@ class _OrdersScreenState extends State<OrdersScreen>
 
   Widget _buildOrderCard(DpOrder order) {
     final statusLabel = _myOrdersStatusLabel(order);
-    final isInTransit = !_isCompletedOrder(order);
+    final isInTransit =
+        !_isCompletedOrder(order) && !_isNotDeliveredOrder(order);
     final orderType = order.isReturnFlow ? 'Return' : order.displayTitle;
     final dateText = _formatOrderDate(order);
 

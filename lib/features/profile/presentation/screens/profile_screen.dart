@@ -421,7 +421,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         );
         Navigator.pushNamedAndRemoveUntil(
           context,
-          AppRoutes.welcomeScreen,
+          AppRoutes.loginScreen,
           (route) => false,
         );
         return;
@@ -477,7 +477,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           if (!context.mounted) return;
           Navigator.pushNamedAndRemoveUntil(
             context,
-            AppRoutes.splashScreen,
+            AppRoutes.loginScreen,
             (route) => false,
           );
         },
