@@ -23,10 +23,20 @@ class EarningOrder {
 
   bool get isPaymentPending => paymentStatus.toLowerCase() == 'pending';
 
+  bool get isWithdrawalRequested {
+    final value = paymentStatus.toLowerCase();
+    return value == 'requested' || value == 'withdrawal_requested';
+  }
+
   bool get isPaymentCompleted {
     final value = paymentStatus.toLowerCase();
-    return value == 'paid' || value == 'completed' || value == 'settled';
+    return value == 'paid' ||
+        value == 'completed' ||
+        value == 'settled' ||
+        value == 'paid_out';
   }
+
+  bool get canWithdraw => isPaymentPending;
 
   String get displayOrderType {
     final type = packageType.toLowerCase();
@@ -38,9 +48,14 @@ class EarningOrder {
     switch (paymentStatus.toLowerCase()) {
       case 'pending':
         return 'Payment Pending';
+      case 'requested':
+      case 'withdrawal_requested':
+        return 'Withdrawal Requested';
       case 'paid':
+      case 'paid_out':
       case 'settled':
-        return 'Payment Settled';
+      case 'completed':
+        return 'Paid';
       case 'approved':
         return 'Approved';
       case 'rejected':
@@ -59,10 +74,35 @@ class EarningOrder {
     final day = date.day.toString().padLeft(2, '0');
     final month = date.month.toString().padLeft(2, '0');
     final year = date.year;
-    final hour = date.hour > 12 ? date.hour - 12 : (date.hour == 0 ? 12 : date.hour);
+    final hour =
+        date.hour > 12 ? date.hour - 12 : (date.hour == 0 ? 12 : date.hour);
     final minute = date.minute.toString().padLeft(2, '0');
     final period = date.hour >= 12 ? 'PM' : 'AM';
     return '$weekday, $day/$month/$year , $hour:$minute $period';
+  }
+
+  EarningOrder copyWith({
+    String? id,
+    String? orderNumber,
+    String? packageType,
+    String? status,
+    double? partnerEarning,
+    String? paymentStatus,
+    DateTime? createdAt,
+    DateTime? deliveredAt,
+    DateTime? completedAt,
+  }) {
+    return EarningOrder(
+      id: id ?? this.id,
+      orderNumber: orderNumber ?? this.orderNumber,
+      packageType: packageType ?? this.packageType,
+      status: status ?? this.status,
+      partnerEarning: partnerEarning ?? this.partnerEarning,
+      paymentStatus: paymentStatus ?? this.paymentStatus,
+      createdAt: createdAt ?? this.createdAt,
+      deliveredAt: deliveredAt ?? this.deliveredAt,
+      completedAt: completedAt ?? this.completedAt,
+    );
   }
 
   static String _titleCase(String value) {

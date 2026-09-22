@@ -13,16 +13,12 @@ class ContentRepository {
 
   final http.Client _client;
 
-  Future<AppContent> getContentByKey(
-    String key, {
+  /// Fetches all Delivery Partner policies from
+  /// `GET /mobile/v1/policies/delivery-partner`.
+  Future<List<AppContent>> getDeliveryPartnerPolicies({
     String fallbackTitle = '',
   }) async {
-    final policyKey = key.trim();
-    if (policyKey.isEmpty) {
-      throw const ApiException('Content key is missing.');
-    }
-
-    final uri = ApiConfig.contentKeyUri(policyKey);
+    final uri = ApiConfig.deliveryPartnerPoliciesUri;
     _logRequest('GET', uri);
 
     try {
@@ -39,20 +35,15 @@ class ContentRepository {
       final success = json?['success'] as bool? ?? response.statusCode == 200;
 
       if (response.statusCode == 200 && success) {
-        final payload = _contentPayload(json, policyKey);
-        if (payload != null) {
-          return AppContent.fromJson(
-            payload,
-            fallbackKey: policyKey,
-            fallbackTitle: fallbackTitle,
-          );
-        }
-        throw const ApiException('Invalid content response from server.');
+        return _parsePoliciesList(
+          json,
+          fallbackTitle: fallbackTitle,
+        );
       }
 
       throw ApiException(
-        json?['message'] as String? ??
-            'Failed to load content (${response.statusCode})',
+        json?['message']?.toString() ??
+            'Failed to load policies (${response.statusCode})',
         statusCode: response.statusCode,
       );
     } on ApiException {
@@ -64,48 +55,163 @@ class ContentRepository {
     }
   }
 
-  static Map<String, dynamic>? _contentPayload(
-    Map<String, dynamic>? json,
-    String requestedKey,
-  ) {
-    if (json == null) return null;
+  /// Loads a single policy by key from the Delivery Partner policies API.
+  Future<AppContent> getContentByKey(
+    String key, {
+    String fallbackTitle = '',
+  }) async {
+    final policyKey = key.trim();
+    if (policyKey.isEmpty) {
+      throw const ApiException('Content key is missing.');
+    }
 
-    final data = json['data'];
-    if (data is Map<String, dynamic>) return data;
+    final policies = await getDeliveryPartnerPolicies(
+      fallbackTitle: fallbackTitle,
+    );
+
+    if (policies.isEmpty) {
+      throw const ApiException('No policies available right now.');
+    }
+
+    final target = policyKey.toLowerCase();
+    for (final policy in policies) {
+      final candidate = policy.key.trim().toLowerCase();
+      if (candidate == target) {
+        return AppContent(
+          key: policy.key,
+          title: policy.title.trim().isNotEmpty ? policy.title : fallbackTitle,
+          body: policy.body,
+        );
+      }
+    }
+
+    // Soft aliases used across older / newer policy_key values.
+    final aliases = _keyAliases(target);
+    for (final policy in policies) {
+      final candidate = policy.key.trim().toLowerCase();
+      if (aliases.contains(candidate)) {
+        return AppContent(
+          key: policy.key,
+          title: policy.title.trim().isNotEmpty ? policy.title : fallbackTitle,
+          body: policy.body,
+        );
+      }
+    }
+
+    throw ApiException('Policy not found for key "$policyKey".');
+  }
+
+  static Set<String> _keyAliases(String key) {
+    switch (key) {
+      case 'terms':
+      case 'terms_conditions':
+      case 'terms-and-conditions':
+      case 'terms_and_conditions':
+        return {
+          'terms',
+          'terms_conditions',
+          'terms-and-conditions',
+          'terms_and_conditions',
+        };
+      case 'privacy':
+      case 'privacy_policy':
+      case 'privacy-policy':
+        return {
+          'privacy',
+          'privacy_policy',
+          'privacy-policy',
+        };
+      case 'about':
+      case 'about_us':
+      case 'about-us':
+        return {
+          'about',
+          'about_us',
+          'about-us',
+        };
+      default:
+        return {key};
+    }
+  }
+
+  static List<AppContent> _parsePoliciesList(
+    Map<String, dynamic>? json, {
+    required String fallbackTitle,
+  }) {
+    if (json == null) return const [];
+
+    final data = json['data'] ?? json['policies'] ?? json['items'];
+
     if (data is List) {
-      final target = requestedKey.trim().toLowerCase();
-      Map<String, dynamic>? firstItem;
-
+      final items = <AppContent>[];
       for (final item in data) {
         if (item is! Map) continue;
         final map = item.map((key, value) => MapEntry(key.toString(), value));
-        firstItem ??= map;
-
-        final policyKey = map['policy_key']?.toString().trim().toLowerCase();
-        final key = map['key']?.toString().trim().toLowerCase();
-        if (policyKey == target || key == target) {
-          return map;
+        final content = AppContent.fromJson(
+          map,
+          fallbackKey: map['policy_key']?.toString() ??
+              map['key']?.toString() ??
+              '',
+          fallbackTitle: fallbackTitle,
+        );
+        if (content.key.trim().isEmpty && content.body.trim().isEmpty) {
+          continue;
         }
+        items.add(content);
+      }
+      return items;
+    }
+
+    if (data is Map) {
+      final map = data.map((key, value) => MapEntry(key.toString(), value));
+
+      // Nested list forms: { data: { policies: [...] } }
+      final nested = map['policies'] ?? map['items'] ?? map['list'];
+      if (nested is List) {
+        return _parsePoliciesList(
+          {'data': nested},
+          fallbackTitle: fallbackTitle,
+        );
       }
 
-      // Fallback so the UI still renders something if key matching fails.
-      return firstItem;
-    }
-    if (data is String && data.trim().isNotEmpty) {
-      return {'content': data.trim()};
+      final content = AppContent.fromJson(
+        map,
+        fallbackKey: map['policy_key']?.toString() ??
+            map['key']?.toString() ??
+            'delivery_partner',
+        fallbackTitle: fallbackTitle,
+      );
+      if (content.body.trim().isEmpty && content.key.trim().isEmpty) {
+        return const [];
+      }
+      return [content];
     }
 
+    if (data is String && data.trim().isNotEmpty) {
+      return [
+        AppContent(
+          key: 'delivery_partner',
+          title: fallbackTitle,
+          body: data.trim(),
+        ),
+      ];
+    }
+
+    // Root-level content fields without a `data` wrapper.
     if (json['content'] != null ||
         json['body'] != null ||
         json['html'] != null ||
-        json['content_html'] != null ||
-        json['policy_html'] != null ||
-        json['policy_value'] != null ||
-        json['text'] != null) {
-      return json;
+        json['policy_html'] != null) {
+      return [
+        AppContent.fromJson(
+          json,
+          fallbackKey: 'delivery_partner',
+          fallbackTitle: fallbackTitle,
+        ),
+      ];
     }
 
-    return null;
+    return const [];
   }
 
   static Map<String, dynamic>? _tryParseJson(String body) {
@@ -113,6 +219,9 @@ class ContentRepository {
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map<String, dynamic>) return decoded;
+      if (decoded is Map) {
+        return decoded.map((key, value) => MapEntry(key.toString(), value));
+      }
     } catch (_) {}
     return null;
   }

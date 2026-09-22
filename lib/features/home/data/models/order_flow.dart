@@ -99,10 +99,9 @@ class OrderFlow {
   List<FlowTransition> get transitions =>
       isReturn ? returnTransitions : deliveryTransitions;
 
-  String get normalizedStatus => order.status.toLowerCase().trim();
+  String get apiStatusKey => order.apiStatusKey;
 
-  bool get isRejected =>
-      normalizedStatus == 'rejected' || normalizedStatus == 'not_delivered';
+  bool get isRejected => order.isNotDelivered || order.isRejectedStatus;
 
   static const _inProgressStatuses = {
     'assigned',
@@ -127,11 +126,11 @@ class OrderFlow {
 
   bool get isCompleted {
     if (isReturn) {
-      return normalizedStatus == 'completed' ||
-          normalizedStatus == 'returned_to_iap';
+      return apiStatusKey == 'completed' ||
+          apiStatusKey == 'returned_to_iap';
     }
 
-    final status = normalizedStatus;
+    final status = apiStatusKey;
     if (status == 'delivery_success' || status == 'completed') {
       return true;
     }
@@ -160,7 +159,7 @@ class OrderFlow {
     if (isRejected) return -1;
     if (isCompleted) return deliveryTransitions.length - 1;
 
-    final status = normalizedStatus;
+    final status = apiStatusKey;
     switch (status) {
       case 'assigned':
         return -1;
@@ -217,11 +216,11 @@ class OrderFlow {
 
   int get _returnCompletedIndex {
     if (isRejected) return -1;
-    if (normalizedStatus == 'returned_to_iap') {
+    if (apiStatusKey == 'returned_to_iap') {
       return returnTransitions.length - 1;
     }
 
-    final status = normalizedStatus;
+    final status = apiStatusKey;
     switch (status) {
       case 'assigned':
       case 'return_assigned':
@@ -291,7 +290,7 @@ class OrderFlow {
     final fromApi = order.labelForStep(
       apiStatus: next.apiStatus,
       occurrence: next.statusOccurrence,
-      currentStatus: normalizedStatus,
+      currentStatus: apiStatusKey,
       preferCurrentStatus: true,
     );
 
@@ -360,7 +359,7 @@ class OrderFlow {
       return order.labelForStep(
         apiStatus: 'assigned',
         occurrence: 0,
-        currentStatus: normalizedStatus,
+        currentStatus: apiStatusKey,
       );
     }
     if (index >= transitions.length) return '';
@@ -380,15 +379,15 @@ class OrderFlow {
   }
 
   String _statusAfterTransition(int index) {
-    if (index < 0 || index >= transitions.length) return normalizedStatus;
+    if (index < 0 || index >= transitions.length) return apiStatusKey;
     return transitions[index].apiStatus;
   }
 
   bool isTransitionCompleted(int index) {
     if (isRejected) return false;
     if (isReturn &&
-        (normalizedStatus == 'returned_to_iap' ||
-            normalizedStatus == 'completed')) {
+        (apiStatusKey == 'returned_to_iap' ||
+            apiStatusKey == 'completed')) {
       return true;
     }
     return index <= completedTransitionIndex;
@@ -408,7 +407,9 @@ class OrderFlow {
 
   String get statusSummary {
     if (isRejected) {
-      return normalizedStatus == 'not_delivered' ? 'Not Delivered' : 'Rejected';
+      return isReturn
+          ? 'Return Failed'
+          : (order.isNotDelivered ? 'Not Delivered' : 'Rejected');
     }
     if (isCompleted) {
       return isReturn ? 'Return Success' : 'Delivery Success';

@@ -58,7 +58,7 @@
     }
 
     void _syncSelectionState(DpOrder? order) {
-      final products = order?.products ?? const [];
+      final products = order?.displayProducts ?? const [];
       final groupedAsKit = products.length > 1 &&
           products.every((product) => product.garments.isEmpty);
       // One checkbox per visible product card (grouped kit = 1 card).
@@ -148,6 +148,7 @@
     Future<void> _updateStatus({
       required String status,
       String? rejectReason,
+      bool? waited10mins,
       List<String> photoProofPaths = const [],
     }) async {
       final order = _order;
@@ -168,6 +169,7 @@
           order: order,
           status: status,
           rejectReason: rejectReason,
+          waited10mins: waited10mins,
           photoProofPaths: photoProofPaths,
           latitude: latitude,
           longitude: longitude,
@@ -602,6 +604,16 @@
                               : () => _showNotDeliveredDialog(context),
                         ),
                       ],
+                      if (_isReturnOrder &&
+                          _journey.nextStep != null) ...[
+                        SizedBox(height: 16.h),
+                        _buildSecondaryButton(
+                          'Return Failed',
+                          onPressed: _isUpdating
+                              ? null
+                              : () => _showReturnFailedDialog(context),
+                        ),
+                      ],
                     ] else if (!_enableWorkflow &&
                         !_journey.isCompleted &&
                         !_journey.isRejected) ...[
@@ -759,7 +771,9 @@
 
     Widget _buildRejectedBanner() {
       final status = _order?.status.toLowerCase().trim();
-      final label = status == 'not_delivered' ? 'Not Delivered' : 'Order Rejected';
+      final label = _isReturnOrder
+          ? 'Return Failed'
+          : (status == 'not_delivered' ? 'Not Delivered' : 'Order Rejected');
       final reason = _order?.rejectionReason?.trim();
       final hasReason = reason != null && reason.isNotEmpty;
       return Container(
@@ -841,64 +855,36 @@
     }
 
     Widget _buildProductsList(DpOrder order) {
-      final products = order.products;
-      final shouldGroupAsKit = products.length > 1 &&
-          products.every((product) => product.garments.isEmpty);
+      final sections = order.productSections;
+      if (sections.isEmpty) {
+        return _buildProductsUnavailable();
+      }
 
-      if (shouldGroupAsKit) {
-        final images = <String>[
-          for (final product in products) ...product.imageUrls,
-        ];
-        final garments = DpOrderGarment.mergeDuplicates(
-          products
-              .map(
-                (product) => DpOrderGarment(
-                  name: product.displayTitle ?? product.name,
-                  quantity: product.quantity != null && product.quantity! > 0
-                      ? product.quantity
-                      : 1,
-                  imageUrl: product.imageUrls.isNotEmpty
-                      ? product.imageUrls.first
-                      : null,
-                ),
-              )
-              .toList(),
-        );
+      final children = <Widget>[];
+      var cardIndex = 0;
 
-        final totalGarments = garments.fold<int>(
-          0,
-          (sum, item) => sum + (item.quantity ?? 1),
-        );
+      for (var sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+        final section = sections[sectionIndex];
+        if (sectionIndex > 0) {
+          children.add(SizedBox(height: 24.h));
+        }
+        children.add(_buildSectionHeader(section.title, section.itemsLabel));
+        children.add(SizedBox(height: 16.h));
 
-        final durationDays = products
-            .map((p) => p.durationDays)
-            .whereType<int>()
-            .toList();
-        final durationLabels = products
-            .map((p) => p.durationLabel?.trim())
-            .whereType<String>()
-            .where((label) => label.isNotEmpty)
-            .toList();
-
-        final kit = DpOrderProduct(
-          name: order.packageType ?? 'Wardrobe Kit',
-          durationDays: durationDays.isEmpty ? null : durationDays.first,
-          durationLabel: durationLabels.isEmpty ? null : durationLabels.first,
-          garmentCount: totalGarments,
-          imageUrls: images,
-          garments: garments,
-        );
-
-        return _buildItemCard(0, kit);
+        for (var productIndex = 0;
+            productIndex < section.products.length;
+            productIndex++) {
+          if (productIndex > 0) {
+            children.add(SizedBox(height: 16.h));
+          }
+          children.add(_buildItemCard(cardIndex, section.products[productIndex]));
+          cardIndex++;
+        }
       }
 
       return Column(
-        children: [
-          for (var index = 0; index < products.length; index++) ...[
-            _buildItemCard(index, products[index]),
-            if (index != products.length - 1) SizedBox(height: 16.h),
-          ],
-        ],
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
       );
     }
 
@@ -914,19 +900,23 @@
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              _buildProductImage(product.imageUrls),
+              _buildProductImage(
+                product.previewImageUrls,
+                showGrid: product.showPreviewGrid,
+              ),
               SizedBox(width: 16.w),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      title ?? 'Product details unavailable',
-                      style: CustomTextStyles.openSansSemiBold.copyWith(
-                        fontSize: 14.fSize,
-                        color: AppColours.secondary,
+                    if (title != null)
+                      Text(
+                        title,
+                        style: CustomTextStyles.openSansSemiBold.copyWith(
+                          fontSize: 14.fSize,
+                          color: AppColours.secondary,
+                        ),
                       ),
-                    ),
                     if (garmentLabel != null) ...[
                       SizedBox(height: 4.h),
                       Text(
@@ -936,6 +926,10 @@
                           color: AppColours.hintcolor,
                         ),
                       ),
+                    ],
+                    if (product.isKidsEssentialsSection && items.isEmpty) ...[
+                      SizedBox(height: 6.h),
+                      _buildNonReturnableBadge(),
                     ],
                   ],
                 ),
@@ -1069,6 +1063,10 @@
                       ),
                     ),
                   ],
+                  if (garment.isNonReturnable) ...[
+                    SizedBox(height: 6.h),
+                    _buildNonReturnableBadge(),
+                  ],
                 ],
               ),
             ),
@@ -1080,6 +1078,26 @@
               ),
             ),
           ],
+        ),
+      );
+    }
+
+    Widget _buildNonReturnableBadge() {
+      return Container(
+        padding: EdgeInsets.symmetric(horizontal: 8.w, vertical: 3.h),
+        decoration: BoxDecoration(
+          color: AppColours.primary.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: AppColours.primary.withValues(alpha: 0.35),
+          ),
+        ),
+        child: Text(
+          'Non-Returnable',
+          style: CustomTextStyles.openSansSemiBold.copyWith(
+            fontSize: 10.fSize,
+            color: AppColours.primary,
+          ),
         ),
       );
     }
@@ -1112,41 +1130,53 @@
       );
     }
 
-    Widget _buildProductImage(List<String> imageUrls) {
+    Widget _buildProductImage(
+      List<String> imageUrls, {
+      bool showGrid = false,
+    }) {
+      final urls = imageUrls
+          .map((url) => url.trim())
+          .where((url) => url.isNotEmpty)
+          .toList();
+      final useGrid = showGrid && urls.length > 1;
+
       return Container(
-        width: 56.w,
-        height: 56.h,
+        width: 64.w,
+        height: 64.h,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
           color: const Color(0xFF1A1A1F),
-          border: Border.all(color: AppColours.primary.withValues(alpha: 0.2)),
+          border: Border.all(
+            color: AppColours.primary.withValues(alpha: 0.55),
+          ),
         ),
         clipBehavior: Clip.antiAlias,
-        child: imageUrls.isEmpty
+        child: urls.isEmpty
             ? Icon(
                 Icons.image_outlined,
                 color: AppColours.primary.withValues(alpha: 0.45),
                 size: 22.h,
               )
-            : imageUrls.length == 1
-                ? Image.network(
-                    imageUrls.first,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => Icon(
-                      Icons.image_outlined,
-                      color: AppColours.primary.withValues(alpha: 0.45),
-                      size: 22.h,
-                    ),
-                  )
-                : GridView.count(
+            : useGrid
+                ? GridView.count(
                     crossAxisCount: 2,
                     physics: const NeverScrollableScrollPhysics(),
                     padding: EdgeInsets.zero,
-                    mainAxisSpacing: 1,
-                    crossAxisSpacing: 1,
-                    children: imageUrls.take(4).map((url) {
+                    mainAxisSpacing: 1.5,
+                    crossAxisSpacing: 1.5,
+                    children: List.generate(4, (index) {
+                      if (index >= urls.length) {
+                        return ColoredBox(
+                          color: const Color(0xFF111217),
+                          child: Icon(
+                            Icons.image_outlined,
+                            color: AppColours.primary.withValues(alpha: 0.2),
+                            size: 12.h,
+                          ),
+                        );
+                      }
                       return Image.network(
-                        url,
+                        urls[index],
                         fit: BoxFit.cover,
                         errorBuilder: (_, __, ___) => ColoredBox(
                           color: const Color(0xFF111217),
@@ -1157,7 +1187,16 @@
                           ),
                         ),
                       );
-                    }).toList(),
+                    }),
+                  )
+                : Image.network(
+                    urls.first,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Icon(
+                      Icons.image_outlined,
+                      color: AppColours.primary.withValues(alpha: 0.45),
+                      size: 22.h,
+                    ),
                   ),
       );
     }
@@ -1591,6 +1630,360 @@
         await _updateStatus(
           status: 'not_delivered',
           rejectReason: reasonController.text.trim(),
+        );
+        if (mounted) {
+          Navigator.pushNamedAndRemoveUntil(
+            context,
+            AppRoutes.mainContainer,
+            (route) => false,
+          );
+        }
+      }
+
+      reasonController.dispose();
+    }
+
+    Future<String?> _pickFailedPhoto(BuildContext sheetContext) async {
+      final source = await showModalBottomSheet<ImageSource>(
+        context: sheetContext,
+        backgroundColor: const Color(0xFF1A1A1F),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        builder: (ctx) => Container(
+          padding: EdgeInsets.all(24.w),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white12,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              SizedBox(height: 24.h),
+              Text(
+                'Upload Failed Proof Photo',
+                style: CustomTextStyles.montserratBold.copyWith(
+                  fontSize: 16.fSize,
+                  color: Colors.white,
+                ),
+              ),
+              SizedBox(height: 24.h),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildSourceButton(
+                      icon: Icons.camera_alt_outlined,
+                      label: 'Camera',
+                      onTap: () => Navigator.pop(ctx, ImageSource.camera),
+                    ),
+                  ),
+                  SizedBox(width: 16.w),
+                  Expanded(
+                    child: _buildSourceButton(
+                      icon: Icons.photo_library_outlined,
+                      label: 'Gallery',
+                      onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 24.h),
+            ],
+          ),
+        ),
+      );
+
+      if (source == null) return null;
+      final picker = ImagePicker();
+      final image = await picker.pickImage(
+        source: source,
+        imageQuality: 35,
+        maxWidth: 1280,
+        maxHeight: 1280,
+      );
+      return image?.path;
+    }
+
+    Future<void> _showReturnFailedDialog(BuildContext context) async {
+      final reasonController = TextEditingController();
+      String? failedPhotoPath;
+      bool waited10mins = false;
+
+      final result = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) => Dialog(
+            backgroundColor: Colors.black87,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+            insetPadding: EdgeInsets.symmetric(horizontal: 20.w, vertical: 24.h),
+            child: SingleChildScrollView(
+              child: Container(
+                padding: EdgeInsets.all(22.w),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: AppColours.primary.withOpacity(0.15)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Text(
+                        'Mark as Return Failed?',
+                        style: CustomTextStyles.montserratBold.copyWith(
+                          fontSize: 18.fSize,
+                          color: AppColours.primary,
+                        ),
+                      ),
+                    ),
+                    SizedBox(height: 20.h),
+
+                    // 1. Upload Photo Proof Box
+                    Text(
+                      'Upload Customer Call History \n(Called at least 3 times) *',
+                      style: CustomTextStyles.montserratBold.copyWith(
+                        fontSize: 11.fSize,
+                        color: AppColours.primary,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    SizedBox(height: 10.h),
+                    GestureDetector(
+                      onTap: () async {
+                        final path = await _pickFailedPhoto(dialogContext);
+                        if (path != null) {
+                          setDialogState(() => failedPhotoPath = path);
+                        }
+                      },
+                      child: DottedBorder(
+                        color: const Color(0x99E6C27A),
+                        strokeWidth: 1.2,
+                        dashPattern: const [6, 4],
+                        borderType: BorderType.RRect,
+                        radius: const Radius.circular(12),
+                        child: Container(
+                          height: 100.h,
+                          width: double.infinity,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0D0F14),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: failedPhotoPath != null
+                              ? Stack(
+                                  children: [
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(12),
+                                      child: Image.file(
+                                        File(failedPhotoPath!),
+                                        fit: BoxFit.cover,
+                                        width: double.infinity,
+                                        height: double.infinity,
+                                      ),
+                                    ),
+                                    Positioned(
+                                      top: 6,
+                                      right: 6,
+                                      child: GestureDetector(
+                                        onTap: () => setDialogState(
+                                          () => failedPhotoPath = null,
+                                        ),
+                                        child: Container(
+                                          padding: const EdgeInsets.all(3),
+                                          decoration: const BoxDecoration(
+                                            color: Colors.black87,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: const Icon(
+                                            Icons.close,
+                                            size: 14,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              : Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.camera_alt_outlined,
+                                      color: AppColours.primary.withOpacity(0.8),
+                                      size: 26.h,
+                                    ),
+                                    SizedBox(height: 6.h),
+                                    Text(
+                                      'Tap to upload proof image *',
+                                      style: CustomTextStyles.openSansRegular.copyWith(
+                                        fontSize: 12.fSize,
+                                        color: AppColours.hintcolor,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(height: 18.h),
+
+                    // 2. Waited 10 mins checkbox concern
+                    GestureDetector(
+                      onTap: () => setDialogState(
+                        () => waited10mins = !waited10mins,
+                      ),
+                      behavior: HitTestBehavior.opaque,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Container(
+                            width: 20.w,
+                            height: 20.w,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF111217),
+                              borderRadius: BorderRadius.circular(5),
+                              border: Border.all(
+                                color: const Color(0xFFE6C27A),
+                                width: 1.5,
+                              ),
+                            ),
+                            child: waited10mins
+                                ? const Center(
+                                    child: Icon(
+                                      Icons.check,
+                                      size: 14,
+                                      color: Color(0xFFE6C27A),
+                                    ),
+                                  )
+                                : null,
+                          ),
+                          SizedBox(width: 10.w),
+                          Expanded(
+                            child: Text(
+                              'I have waited at least 10 minutes at location *',
+                              style: CustomTextStyles.openSansRegular.copyWith(
+                                fontSize: 13.fSize,
+                                color: AppColours.secondary,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    SizedBox(height: 18.h),
+
+                    // 3. Reason Box
+                    Text(
+                      'REASON *',
+                      style: CustomTextStyles.montserratBold.copyWith(
+                        fontSize: 11.fSize,
+                        color: AppColours.primary,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    SizedBox(height: 10.h),
+                    DottedBorder(
+                      color: const Color(0x99E6C27A),
+                      strokeWidth: 1.2,
+                      dashPattern: const [6, 4],
+                      borderType: BorderType.RRect,
+                      radius: const Radius.circular(12),
+                      child: Container(
+                        height: 95.h,
+                        padding: EdgeInsets.all(12.w),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          color: Colors.transparent,
+                        ),
+                        child: TextField(
+                          controller: reasonController,
+                          maxLines: 4,
+                          style: const TextStyle(
+                            color: AppColours.secondary,
+                            fontSize: 13,
+                          ),
+                          decoration: const InputDecoration(
+                            hintText: 'Customer door locked / unreachable',
+                            hintStyle: TextStyle(
+                              color: Colors.white38,
+                              fontSize: 13,
+                            ),
+                            border: InputBorder.none,
+                            isDense: true,
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(height: 26.h),
+
+                    // 4. Buttons
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildSecondaryButton(
+                            'Back',
+                            onPressed: () => Navigator.pop(dialogContext),
+                          ),
+                        ),
+                        SizedBox(width: 12.w),
+                        Expanded(
+                          child: _buildPrimaryButton(
+                            'Yes, Confirm',
+                            onPressed: () {
+                              if (failedPhotoPath == null || failedPhotoPath!.trim().isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Please upload a proof photo.'),
+                                  ),
+                                );
+                                return;
+                              }
+                              if (!waited10mins) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Please confirm you have waited at least 10 minutes.'),
+                                  ),
+                                );
+                                return;
+                              }
+                              final reason = reasonController.text.trim();
+                              if (reason.isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Please enter a failure reason.'),
+                                  ),
+                                );
+                                return;
+                              }
+                              Navigator.pop(dialogContext, {
+                                'reason': reason,
+                                'waited10mins': waited10mins,
+                                'photoPath': failedPhotoPath,
+                              });
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      if (result != null && mounted) {
+        final photoPath = result['photoPath'] as String?;
+        await _updateStatus(
+          status: 'not_delivered',
+          rejectReason: result['reason'] as String?,
+          waited10mins: result['waited10mins'] as bool?,
+          photoProofPaths: photoPath != null ? [photoPath] : const [],
         );
         if (mounted) {
           Navigator.pushNamedAndRemoveUntil(

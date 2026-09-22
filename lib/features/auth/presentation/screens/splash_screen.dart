@@ -35,6 +35,7 @@ class _SplashScreenState extends State<SplashScreen> {
     final splashDelay = Future.delayed(const Duration(seconds: 3));
 
     // Ensure SharedPreferences values are loaded before any routing decision.
+    await AuthSession.restore();
     await WaitlistSession.restore();
 
     final referenceId = WaitlistSession.referenceId?.trim();
@@ -42,6 +43,7 @@ class _SplashScreenState extends State<SplashScreen> {
     final mobileNumber = WaitlistSession.mobileNumber;
 
     debugPrint('========== SPLASH ==========');
+    debugPrint('hasValidSession: ${AuthSession.hasValidSession}');
     debugPrint('reference_id: $referenceId');
     debugPrint('waitlist_number: $waitlistNumber');
     debugPrint('mobile_number: $mobileNumber');
@@ -53,16 +55,19 @@ class _SplashScreenState extends State<SplashScreen> {
     }
     debugPrint('============================');
 
-    if (AuthSession.isLoggedIn) {
+    // Auth must be based on a valid JWT/session — never cached profile alone.
+    if (AuthSession.hasValidSession) {
       await splashDelay;
       if (!mounted) return;
       Navigator.pushReplacementNamed(context, AppRoutes.mainContainer);
       return;
     }
 
+    // Stale/invalid token already cleared in AuthSession.restore().
     if (referenceId == null || referenceId.isEmpty) {
       await splashDelay;
       if (!mounted) return;
+      // Unauthenticated entry (Welcome → Login / Register). Never open Home.
       Navigator.pushReplacementNamed(context, AppRoutes.welcomeScreen);
       return;
     }

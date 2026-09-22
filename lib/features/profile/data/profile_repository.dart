@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:nomoride/core/config/api_config.dart';
 import 'package:nomoride/core/network/api_exception.dart';
+import 'package:nomoride/core/network/session_guard.dart';
 import 'package:nomoride/core/services/auth_session.dart';
 import 'package:nomoride/features/profile/data/models/delivery_partner_profile.dart';
 
@@ -28,6 +29,11 @@ class ProfileRepository {
   }
 
   Future<DeliveryPartnerProfile> getProfile({bool forceRefresh = false}) async {
+    if (!AuthSession.hasValidSession) {
+      clearCache();
+      throw const ApiException('Please login to view profile.');
+    }
+
     if (!forceRefresh && _cachedProfile != null) {
       debugPrint('========== PROFILE ==========');
       debugPrint('API called: no');
@@ -52,6 +58,7 @@ class ProfileRepository {
       );
 
       _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;
 
@@ -105,6 +112,7 @@ class ProfileRepository {
       );
 
       _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;
 
@@ -154,6 +162,7 @@ class ProfileRepository {
       );
 
       _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;
 
@@ -200,15 +209,8 @@ class ProfileRepository {
           .timeout(const Duration(seconds: 30));
 
       _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
       final json = _tryParseJson(response.body);
-
-      if (response.statusCode == 401) {
-        throw ApiException(
-          _extractErrorMessage(json, response.body) ??
-              'Session expired. Please login again.',
-          statusCode: 401,
-        );
-      }
 
       final success = json?['success'] as bool? ?? false;
       if (response.statusCode >= 200 && response.statusCode < 300) {
@@ -257,8 +259,8 @@ class ProfileRepository {
   }
 
   void _ensureLoggedIn() {
-    final token = AuthSession.authToken?.trim();
-    if (token == null || token.isEmpty) {
+    if (!AuthSession.hasValidSession) {
+      clearCache();
       throw const ApiException('Please login to view profile.');
     }
   }

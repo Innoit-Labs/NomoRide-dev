@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'package:nomoride/core/config/api_config.dart';
 import 'package:nomoride/core/network/api_exception.dart';
+import 'package:nomoride/core/network/session_guard.dart';
 import 'package:nomoride/core/services/auth_session.dart';
 import 'package:nomoride/features/home/data/models/dp_order.dart';
 import 'package:nomoride/features/orders/data/my_orders_repository.dart';
@@ -21,8 +22,7 @@ class OrdersRepository {
   final MyOrdersRepository _myOrdersRepository;
 
   Future<List<DpOrder>> getDpOrders() async {
-    final token = AuthSession.authToken?.trim();
-    if (token == null || token.isEmpty) {
+    if (!AuthSession.hasValidSession) {
       throw const ApiException('Please login to view orders.');
     }
 
@@ -39,6 +39,7 @@ class OrdersRepository {
       );
 
       _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
 
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;
@@ -129,12 +130,12 @@ class OrdersRepository {
     required DpOrder order,
     required String status,
     String? rejectReason,
+    bool? waited10mins,
     List<String> photoProofPaths = const [],
     double? latitude,
     double? longitude,
   }) async {
-    final token = AuthSession.authToken?.trim();
-    if (token == null || token.isEmpty) {
+    if (!AuthSession.hasValidSession) {
       throw const ApiException('Please login to update order status.');
     }
 
@@ -155,13 +156,14 @@ class OrdersRepository {
         .toSet()
         .toList();
 
-    if (validPhotos.isNotEmpty) {
+    if (validPhotos.isNotEmpty || status == 'not_delivered') {
       return _updateOrderStatusMultipart(
         id: id,
         orderNumber: orderNumber,
         status: status,
         flowType: flowType,
         rejectReason: rejectReason,
+        waited10mins: waited10mins,
         photoProofPaths: validPhotos,
         latitude: latitude,
         longitude: longitude,
@@ -174,6 +176,7 @@ class OrdersRepository {
       status: status,
       flowType: flowType,
       rejectReason: rejectReason,
+      waited10mins: waited10mins,
       latitude: latitude,
       longitude: longitude,
     );
@@ -181,14 +184,18 @@ class OrdersRepository {
 
   Map<String, String> _statusFields({
     required String id,
+    required String orderNumber,
     required String status,
     required String flowType,
     String? rejectReason,
+    bool? waited10mins,
     double? latitude,
     double? longitude,
   }) {
     final fields = <String, String>{
       'id': id.trim(),
+      'orderNumber': orderNumber.trim(),
+      'order_number': orderNumber.trim(),
       'status': status.trim(),
       'flow_type': flowType.trim(),
     };
@@ -196,6 +203,12 @@ class OrdersRepository {
     final reason = rejectReason?.trim();
     if (reason != null && reason.isNotEmpty) {
       fields['reject_reason'] = reason;
+      fields['reason'] = reason;
+    }
+
+    if (waited10mins != null) {
+      fields['waited10mins'] = waited10mins.toString();
+      fields['waited_10_mins'] = waited10mins.toString();
     }
 
     if (latitude != null && longitude != null) {
@@ -216,6 +229,7 @@ class OrdersRepository {
     required String status,
     required String flowType,
     String? rejectReason,
+    bool? waited10mins,
     double? latitude,
     double? longitude,
   }) async {
@@ -223,9 +237,11 @@ class OrdersRepository {
     final body = jsonEncode(
       _statusFields(
         id: id,
+        orderNumber: orderNumber,
         status: status,
         flowType: flowType,
         rejectReason: rejectReason,
+        waited10mins: waited10mins,
         latitude: latitude,
         longitude: longitude,
       ),
@@ -266,6 +282,7 @@ class OrdersRepository {
     required String status,
     required String flowType,
     String? rejectReason,
+    bool? waited10mins,
     required List<String> photoProofPaths,
     double? latitude,
     double? longitude,
@@ -281,9 +298,11 @@ class OrdersRepository {
     request.fields.addAll(
       _statusFields(
         id: id,
+        orderNumber: orderNumber,
         status: status,
         flowType: flowType,
         rejectReason: rejectReason,
+        waited10mins: waited10mins,
         latitude: latitude,
         longitude: longitude,
       ),
@@ -295,13 +314,14 @@ class OrdersRepository {
       if (added) addedFiles++;
     }
 
-    if (addedFiles == 0) {
+    if (addedFiles == 0 && status != 'not_delivered') {
       return _updateOrderStatusJson(
         id: id,
         orderNumber: orderNumber,
         status: status,
         flowType: flowType,
         rejectReason: rejectReason,
+        waited10mins: waited10mins,
         latitude: latitude,
         longitude: longitude,
       );
@@ -335,6 +355,12 @@ class OrdersRepository {
     required int statusCode,
     required String body,
   }) async {
+    if (statusCode == 401) {
+      await SessionGuard.ensureAuthorized(
+        http.Response(body, statusCode),
+      );
+    }
+
     if (statusCode == 413) {
       throw const ApiException(
         'Photo file is too large. Please use a smaller image.',
@@ -426,6 +452,8 @@ class OrdersRepository {
         return 'pickup_photo_proof';
       case 'confirm_delivery':
         return 'delivery_photo_proof';
+      case 'not_delivered':
+        return 'pickup_failed_image';
       default:
         return 'photo_proof';
     }

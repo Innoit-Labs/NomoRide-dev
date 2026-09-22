@@ -2,6 +2,8 @@ class ApiConfig {
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
     defaultValue: 'https://nomowear-backend.onrender.com',
+    // defaultValue: 'http://192.168.0.15:5000',
+
   );
 
   static const String _mobileDeliveryPartners = '/mobile/v1/delivery_partners';
@@ -49,6 +51,10 @@ class ApiConfig {
 
   static Uri contentKeyUri(String policyKey) =>
       Uri.parse('$baseUrl/policies/key/${Uri.encodeComponent(policyKey.trim())}');
+
+  /// Delivery Partner policies (terms, privacy, about, etc.).
+  static Uri get deliveryPartnerPoliciesUri =>
+      Uri.parse('$baseUrl/mobile/v1/policies/delivery-partner');
 
   static Uri waitlistStatusUri(String idOrNumber) => Uri.parse(
         '$baseUrl/waitlist/status/${Uri.encodeComponent(idOrNumber.trim())}',
