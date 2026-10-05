@@ -4,7 +4,9 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter/foundation.dart';
 import 'package:nomoride/core/network/api_exception.dart';
 import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/core/services/fcm_service.dart';
 import 'package:nomoride/core/services/onesignal_service.dart';
+import 'package:nomoride/core/services/socket_service.dart';
 import 'package:nomoride/features/auth/data/auth_repository.dart';
 import 'package:nomoride/features/auth/data/models/otp_session.dart';
 
@@ -91,6 +93,13 @@ class OtpBloc extends Bloc<OtpEvent, OtpState> {
       await OneSignalService.initialize(partnerId: _session.partnerId);
 
       debugPrint('[OTP DEBUG] OneSignal initialization call completed');
+      debugPrint('[OTP DEBUG] Syncing FCM token to backend');
+      await FcmService.sendTokenToServer();
+      debugPrint('[OTP DEBUG] FCM token sync completed');
+
+      debugPrint('[OTP DEBUG] Connecting to Socket.IO');
+      SocketService.instance.initAndConnect(partnerId: _session.partnerId);
+
       debugPrint('[OTP DEBUG] About to continue existing navigation flow');
 
       emit(state.copyWith(isSuccess: true, isLoading: false));

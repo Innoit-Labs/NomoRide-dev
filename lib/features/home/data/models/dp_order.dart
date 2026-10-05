@@ -640,21 +640,17 @@ class DpOrder {
   }
 
   static List<DpOrderProduct> _readProducts(Map<String, dynamic> json) {
-    final items = json['items'];
+    final items = json['items'] ?? json['orderItems'] ?? json['order_items'];
     if (items is! List || items.isEmpty) return const [];
     return _parseProductItems(items);
   }
 
   static List<DpOrderProduct> _parseProductItems(List<dynamic> rawItems) {
     final products = <DpOrderProduct>[];
-    final seenKeys = <String>{};
 
     for (final entry in rawItems) {
       if (entry is! Map) continue;
       final map = entry.map((key, value) => MapEntry(key.toString(), value));
-      final dedupeKey = _itemDedupeKey(map);
-      if (seenKeys.contains(dedupeKey)) continue;
-      seenKeys.add(dedupeKey);
 
       final product = DpOrderProduct.fromJson(map);
       final hasContent = (product.name?.trim().isNotEmpty == true) ||
@@ -664,11 +660,6 @@ class DpOrder {
     }
 
     return products;
-  }
-
-  static String _itemDedupeKey(Map<String, dynamic> json) {
-    final productId = json['productId'];
-    return 'product:${productId?.toString().trim() ?? json.hashCode}';
   }
 
   static Map<String, String> _readStepLabels(Map<String, dynamic> json) {

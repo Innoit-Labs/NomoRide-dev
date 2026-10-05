@@ -156,6 +156,8 @@ class DpOrderProduct {
     this.quantity,
     this.garments = const [],
     this.sectionType,
+    this.imageUrl,
+    this.size,
   });
 
   final String? name;
@@ -163,6 +165,8 @@ class DpOrderProduct {
   final int? quantity;
   final List<DpOrderGarment> garments;
   final OrderItemSectionType? sectionType;
+  final String? imageUrl;
+  final String? size;
 
   bool get isKidsEssentialsSection =>
       sectionType == OrderItemSectionType.kidsEssentials;
@@ -180,9 +184,19 @@ class DpOrderProduct {
   }
 
   String? get garmentCountLabel {
-    final count = effectiveGarmentCount;
-    if (count == null) return null;
-    return 'No of Garments: $count';
+    if (garments.length > 1) {
+      final count = effectiveGarmentCount ?? garments.length;
+      return 'No of Garments: $count';
+    }
+    if (garments.length == 1) {
+      final g = garments.first;
+      final parts = <String>[];
+      if (g.size != null && g.size!.isNotEmpty) parts.add('Size: ${g.size}');
+      parts.add('Qty: ${g.quantity ?? quantity ?? 1}');
+      return parts.join(' · ');
+    }
+    final q = quantity ?? 1;
+    return 'Qty: $q';
   }
 
   int? get effectiveGarmentCount {
@@ -198,7 +212,7 @@ class DpOrderProduct {
     return DpOrderGarment.mergeDuplicates(garments);
   }
 
-  bool get canExpand => expandableItems.isNotEmpty;
+  bool get canExpand => expandableItems.length > 1;
 
   /// Images for the kit header thumbnail grid (garment images first, up to 4).
   List<String> get previewImageUrls {
@@ -211,6 +225,13 @@ class DpOrderProduct {
       if (urls.length >= 4) break;
     }
 
+    if (urls.isEmpty) {
+      final fallback = imageUrl?.trim();
+      if (fallback != null && fallback.isNotEmpty) {
+        urls.add(fallback);
+      }
+    }
+
     return urls;
   }
 
@@ -220,20 +241,43 @@ class DpOrderProduct {
   factory DpOrderProduct.fromJson(Map<String, dynamic> json) {
     final kitDetails = _parseKitDetailsMap(json);
     final sectionType = OrderItemClassifier.classify(json, kitDetails);
-    final garments = _readGarments(kitDetails);
-    final markedGarments = sectionType == OrderItemSectionType.kidsEssentials
-        ? [
-            for (final garment in garments)
-              garment.copyWith(isNonReturnable: true),
-          ]
-        : garments;
+    var garments = _readGarments(kitDetails);
+
+    final imageUrl = _readString(
+      json['imageUrl'] ??
+          json['image'] ??
+          json['primary_image_url'] ??
+          json['product_image'],
+    );
+    final size = _readString(json['size']);
+    final qty = _readInt(json['quantity']) ?? 1;
+    final productName = _readString(json['productName'] ?? json['product_name']);
+
+    if (garments.isEmpty && productName != null && productName.isNotEmpty) {
+      garments = [
+        DpOrderGarment(
+          name: productName,
+          size: size,
+          quantity: qty,
+          imageUrl: imageUrl,
+          isNonReturnable: sectionType == OrderItemSectionType.kidsEssentials,
+        ),
+      ];
+    } else if (sectionType == OrderItemSectionType.kidsEssentials) {
+      garments = [
+        for (final garment in garments)
+          garment.copyWith(isNonReturnable: true),
+      ];
+    }
 
     return DpOrderProduct(
-      name: _readString(json['productName']),
+      name: productName,
       kitType: _readString(kitDetails?['kit_type']),
-      quantity: _readInt(json['quantity']),
-      garments: markedGarments,
+      quantity: qty,
+      garments: garments,
       sectionType: sectionType,
+      imageUrl: imageUrl,
+      size: size,
     );
   }
 

@@ -26,8 +26,25 @@ class ApiConfig {
   static Uri get dpOrdersUri =>
       Uri.parse('$baseUrl$_mobileDeliveryPartners/getDpOrders');
 
+  static Uri singleOrderUri(String idOrNumber) =>
+      Uri.parse('$baseUrl$_mobileDeliveryPartners/orders/${Uri.encodeComponent(idOrNumber.trim())}');
+
   static Uri get orderStatusUpdateUri =>
       Uri.parse('$baseUrl/mobile/v1/delivery_partners/order-status-update');
+
+  static Uri get fcmTokenUri =>
+      Uri.parse('$baseUrl$_mobileDeliveryPartners/fcm-token');
+
+  static Uri get notificationsUri =>
+      Uri.parse('$baseUrl$_mobileDeliveryPartners/notifications');
+
+  static Uri get clearAllNotificationsUri =>
+      Uri.parse('$baseUrl$_mobileDeliveryPartners/notifications/clear-all');
+
+  static Uri get acceptBroadcastOrderUri =>
+      Uri.parse('$baseUrl$_mobileDeliveryPartners/acceptBroadcastOrder');
+
+  static String get socketUrl => baseUrl;
 
   static Uri get uploadUri => Uri.parse('$baseUrl/upload');
 

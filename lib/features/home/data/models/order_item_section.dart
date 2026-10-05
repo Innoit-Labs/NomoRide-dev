@@ -10,11 +10,11 @@ extension OrderItemSectionTypeX on OrderItemSectionType {
   String get title {
     switch (this) {
       case OrderItemSectionType.subscription:
-        return 'Subscription';
+        return 'Subscription Items';
       case OrderItemSectionType.nonSubscription:
-        return 'Non-Subscription';
+        return 'Non-Subscription Items';
       case OrderItemSectionType.kidsEssentials:
-        return 'Kids & Essentials';
+        return 'Kids Items';
     }
   }
 }
@@ -33,12 +33,19 @@ class OrderProductSection {
   int get itemCount {
     var count = 0;
     for (final product in products) {
-      count += product.effectiveGarmentCount ?? 1;
+      count += product.effectiveGarmentCount ?? product.quantity ?? 1;
     }
     return count;
   }
 
-  String get itemsLabel => itemCount == 1 ? '1 Item' : '$itemCount Items';
+  String get itemsLabel {
+    final count = itemCount;
+    if (type == OrderItemSectionType.subscription ||
+        type == OrderItemSectionType.nonSubscription) {
+      return count == 1 ? '1 Garment' : '$count Garments';
+    }
+    return count == 1 ? '1 Item' : '$count Items';
+  }
 }
 
 class OrderItemClassifier {
@@ -48,11 +55,12 @@ class OrderItemClassifier {
     Map<String, dynamic> json, [
     Map<String, dynamic>? kitDetails,
   ]) {
-    final itemType = _normalizeKey(json['itemType']);
-    final cartSection = _normalizeKey(json['cart_section']);
-    final categoryName = _normalizeKey(json['categoryName']);
+    final itemType = _normalizeKey(json['itemType'] ?? json['item_type']);
+    final cartSection = _normalizeKey(json['cart_section'] ?? json['cartSection']);
+    final categoryName = _normalizeKey(json['categoryName'] ?? json['category_name']);
+    final productName = _normalizeKey(json['productName'] ?? json['product_name']);
 
-    if (_isKidsEssentials(itemType, cartSection, categoryName)) {
+    if (_isKidsEssentials(itemType, cartSection, categoryName, productName)) {
       return OrderItemSectionType.kidsEssentials;
     }
 
@@ -60,8 +68,25 @@ class OrderItemClassifier {
       return OrderItemSectionType.subscription;
     }
 
-    if (itemType == 'non_subscription' || cartSection == 'non_subscription') {
+    if (itemType == 'non_subscription' ||
+        cartSection == 'non_subscription' ||
+        itemType == 'nonsubscription' ||
+        cartSection == 'nonsubscription') {
       return OrderItemSectionType.nonSubscription;
+    }
+
+    if (kitDetails != null) {
+      final kitNonSub = kitDetails['non_subscription'];
+      final kitCartSection =
+          _normalizeKey(kitDetails['cart_section'] ?? kitDetails['cartSection']);
+      if (kitNonSub == true ||
+          kitCartSection == 'non_subscription' ||
+          kitCartSection == 'nonsubscription') {
+        return OrderItemSectionType.nonSubscription;
+      }
+      if (kitNonSub == false || kitCartSection == 'subscription') {
+        return OrderItemSectionType.subscription;
+      }
     }
 
     return OrderItemSectionType.nonSubscription;
@@ -71,31 +96,21 @@ class OrderItemClassifier {
     String? itemType,
     String? cartSection,
     String? categoryName,
+    String? productName,
   ) {
-    const keys = {
-      'kids_essentials',
-      'kids_and_essentials',
-      'kids_&_essentials',
-      'kids_essential',
-      'essential_wear',
-      'kids_wear',
-      'essential',
-      'essentials',
-    };
-
-    if (itemType != null && keys.contains(itemType)) return true;
-    if (cartSection != null && keys.contains(cartSection)) return true;
-
-    if (categoryName != null) {
-      if (categoryName.contains('kids') && categoryName.contains('essential')) {
-        return true;
-      }
-      if (categoryName == 'kids_wear' ||
-          categoryName == 'essential_wear' ||
-          categoryName == 'kids & essentials') {
-        return true;
-      }
+    bool hasKid(String? val) {
+      if (val == null) return false;
+      return val == 'kids' ||
+          val.contains('kid') ||
+          val.contains('child') ||
+          val.contains('baby') ||
+          val.contains('essential');
     }
+
+    if (hasKid(itemType)) return true;
+    if (hasKid(cartSection)) return true;
+    if (hasKid(categoryName)) return true;
+    if (hasKid(productName)) return true;
 
     return false;
   }

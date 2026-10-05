@@ -28,8 +28,8 @@ class MyOrdersData {
     if (value is! List) return const [];
 
     return value
-        .whereType<Map<String, dynamic>>()
-        .map(DpOrder.fromJson)
+        .whereType<Map>()
+        .map((e) => DpOrder.fromJson(e.map((k, v) => MapEntry(k.toString(), v))))
         .where(
           (order) =>
               order.orderNumber.isNotEmpty &&

@@ -44,13 +44,7 @@ class _OrdersScreenState extends State<OrdersScreen>
     });
 
     try {
-      final dataFuture = _repository.getMyOrders();
-      final profileFuture = ProfileRepository().getProfile().then(
-        (_) {},
-        onError: (_) {},
-      );
-      final data = await dataFuture;
-      await profileFuture;
+      final data = await _repository.getMyOrders();
       if (!mounted) return;
       setState(() => _ordersData = data);
     } catch (error) {
