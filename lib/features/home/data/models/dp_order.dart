@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:nomoride/features/home/data/models/delivery_fee.dart';
 import 'package:nomoride/features/home/data/models/dp_order_product.dart';
 import 'package:nomoride/features/home/data/models/order_item_section.dart';
 import 'package:nomoride/features/home/data/models/order_journey.dart';
@@ -37,6 +38,9 @@ class DpOrder {
     this.completedAt,
     this.deliveryDate,
     this.deliveryTime,
+    this.returnDate,
+    this.returnTime,
+    this.returnNotes,
     this.rejectionReason,
     this.waited10mins,
     this.pickupFailedImages = const [],
@@ -73,6 +77,9 @@ class DpOrder {
   final String? completedAt;
   final String? deliveryDate;
   final String? deliveryTime;
+  final String? returnDate;
+  final String? returnTime;
+  final String? returnNotes;
   final String? rejectionReason;
   final int? waited10mins;
   final List<String> pickupFailedImages;
@@ -179,21 +186,37 @@ class DpOrder {
   }
 
   String get displayTitle {
+    switch (flowType?.toLowerCase().trim()) {
+      case 'pickup':
+        return 'Order Pickup';
+      case 'return':
+        return 'Order Return';
+      case 'delivery':
+        return 'Order Delivery';
+    }
+
+    if (isReturnFlow) return 'Order Return';
+
     final type = orderType?.toLowerCase().trim() ?? '';
+    if (type.contains('return')) return 'Order Return';
     if (type == 'pickup' || type.contains('pickup')) return 'Order Pickup';
     if (type == 'delivery' || type.contains('delivery')) {
       return 'Order Delivery';
     }
-    if (type.contains('return') || isReturnFlow) return 'Order Return';
-
-    final flow = flowType?.toLowerCase().trim() ?? '';
-    if (flow == 'return') return 'Order Return';
-    if (flow == 'delivery') {
-      return isPickupPhase ? 'Order Pickup' : 'Order Delivery';
-    }
-
-    if (isPickupPhase) return 'Order Pickup';
     return 'Order Delivery';
+  }
+
+  /// Card icon follows [flowType], so a delivery stays a delivery while the
+  /// partner is still collecting the garments.
+  bool get usesDeliveryIcon {
+    switch (flowType?.toLowerCase().trim()) {
+      case 'delivery':
+        return true;
+      case 'pickup':
+      case 'return':
+        return false;
+    }
+    return isDeliveryOrderCard;
   }
 
   String get packageDisplayTitle {
@@ -299,11 +322,27 @@ class DpOrder {
     }
   }
 
-  String get formattedDeliverySchedule {
-    final dateStr = _resolvedDeliveryDate?.trim();
-    final timeStr = _resolvedDeliveryTime?.trim();
+  /// Returns the appropriate schedule display:
+  /// - For Return Order flow: the customer's actual requested return date and time.
+  /// - For Delivery/Pickup flow: the garment delivery schedule.
+  String get formattedDeliverySchedule => formattedSchedule;
+
+  String get formattedSchedule {
+    if (isReturnFlow) {
+      return formattedReturnSchedule;
+    }
+    return _formattedStandardDeliverySchedule;
+  }
+
+  /// Formatted customer requested return date and time for Return Order flow.
+  String get formattedReturnSchedule {
+    final dateStr = _resolvedReturnDate?.trim();
+    final timeStr = _resolvedReturnTime?.trim();
 
     if (dateStr == null || dateStr.isEmpty) {
+      if (timeStr != null && timeStr.isNotEmpty) {
+        return timeStr;
+      }
       return 'Not scheduled';
     }
 
@@ -313,6 +352,37 @@ class DpOrder {
       return '$displayDate $timeStr';
     }
     return displayDate;
+  }
+
+  String get _formattedStandardDeliverySchedule {
+    final dateStr = _resolvedDeliveryDate?.trim();
+    final timeStr = _resolvedDeliveryTime?.trim();
+
+    if (dateStr == null || dateStr.isEmpty) {
+      if (timeStr != null && timeStr.isNotEmpty) {
+        return timeStr;
+      }
+      return 'Not scheduled';
+    }
+
+    final displayDate = _formatCalendarDateLabel(dateStr) ?? dateStr;
+
+    if (timeStr != null && timeStr.isNotEmpty) {
+      return '$displayDate $timeStr';
+    }
+    return displayDate;
+  }
+
+  String? get _resolvedReturnDate {
+    final stored = returnDate?.trim();
+    if (stored != null && stored.isNotEmpty) return _normalizeDateOnly(stored);
+    return null;
+  }
+
+  String? get _resolvedReturnTime {
+    final stored = returnTime?.trim();
+    if (stored != null && stored.isNotEmpty) return stored;
+    return null;
   }
 
   String? get _resolvedDeliveryDate {
@@ -374,11 +444,45 @@ class DpOrder {
     return null;
   }
 
-  /// Prefer dedicated instructions; fall back to [notes].
+  /// Primary notes text to display (prioritizes customer return notes for return flow).
+  String? get displayNotes {
+    if (isReturnFlow) {
+      final rNote = returnNotes?.trim();
+      if (rNote != null && rNote.isNotEmpty) return rNote;
+      final gNote = notes?.trim();
+      if (gNote != null && gNote.isNotEmpty) return gNote;
+      final instr = instructions?.trim();
+      if (instr != null && instr.isNotEmpty) return instr;
+      return null;
+    }
+    final gNote = notes?.trim();
+    if (gNote != null && gNote.isNotEmpty) return gNote;
+    final rNote = returnNotes?.trim();
+    if (rNote != null && rNote.isNotEmpty) return rNote;
+    final instr = instructions?.trim();
+    if (instr != null && instr.isNotEmpty) return instr;
+    return null;
+  }
+
+  /// Prefer dedicated instructions; fall back to [returnNotes] / [notes].
   String? get displayInstructions {
+    if (isReturnFlow) {
+      final rNote = returnNotes?.trim() ?? notes?.trim();
+      final instr = instructions?.trim();
+
+      if (rNote != null && rNote.isNotEmpty) {
+        if (instr != null && instr.isNotEmpty && instr != rNote) {
+          return '$rNote\n\nInstructions: $instr';
+        }
+        return rNote;
+      }
+      if (instr != null && instr.isNotEmpty) return instr;
+      return null;
+    }
+
     final text = instructions?.trim();
     if (text != null && text.isNotEmpty) return text;
-    final note = notes?.trim();
+    final note = notes?.trim() ?? returnNotes?.trim();
     if (note != null && note.isNotEmpty) return note;
     return null;
   }
@@ -466,6 +570,9 @@ class DpOrder {
       completedAt: completedAt ?? this.completedAt,
       deliveryDate: deliveryDate ?? this.deliveryDate,
       deliveryTime: deliveryTime ?? this.deliveryTime,
+      returnDate: returnDate ?? this.returnDate,
+      returnTime: returnTime ?? this.returnTime,
+      returnNotes: returnNotes ?? this.returnNotes,
       rejectionReason: rejectionReason ?? this.rejectionReason,
       waited10mins: waited10mins ?? this.waited10mins,
       pickupFailedImages: pickupFailedImages ?? this.pickupFailedImages,
@@ -473,12 +580,41 @@ class DpOrder {
   }
 
   factory DpOrder.fromJson(Map<String, dynamic> json) {
+    final pickupAddressRaw = json['pickupAddress'] ??
+        json['pickup_address'] ??
+        json['pickupLocation'] ??
+        json['pickup'];
+    final pickupAddressMap = _tryParseAddressMap(pickupAddressRaw);
     final deliveryAddressRaw = json['delivery_address'] ??
         json['dropAddress'] ??
         json['drop_address'] ??
         json['dropLocation'] ??
         json['drop'];
     final deliveryAddressMap = _tryParseAddressMap(deliveryAddressRaw);
+    final pickupLatitude = _readDouble(
+          json['pickup_latitude'] ??
+              json['pickupLatitude'] ??
+              pickupAddressMap?['latitude'],
+        ) ??
+        _readDouble(pickupAddressMap?['lat']);
+    final pickupLongitude = _readDouble(
+          json['pickup_longitude'] ??
+              json['pickupLongitude'] ??
+              pickupAddressMap?['longitude'],
+        ) ??
+        _readDouble(pickupAddressMap?['lng']);
+    final deliveryLatitude = _readDouble(
+          json['delivery_latitude'] ??
+              json['deliveryLatitude'] ??
+              deliveryAddressMap?['latitude'],
+        ) ??
+        _readDouble(deliveryAddressMap?['lat']);
+    final deliveryLongitude = _readDouble(
+          json['delivery_longitude'] ??
+              json['deliveryLongitude'] ??
+              deliveryAddressMap?['longitude'],
+        ) ??
+        _readDouble(deliveryAddressMap?['lng']);
     final stepLabels = _readStepLabels(json);
     final customer = _readCustomerMap(json);
 
@@ -526,12 +662,7 @@ class DpOrder {
             json['mobile'],
       ),
       products: _readProducts(json),
-      pickupAddress: _readAddress(
-        json['pickupAddress'] ??
-            json['pickup_address'] ??
-            json['pickupLocation'] ??
-            json['pickup'],
-      ),
+      pickupAddress: _readAddress(pickupAddressRaw),
       dropAddress: _readAddress(deliveryAddressRaw),
       scheduledTime: _readString(
         json['scheduledTime'] ??
@@ -541,16 +672,16 @@ class DpOrder {
             json['created_at'] ??
             json['time'],
       ),
-      amount: _readString(
-        json['amount'] ??
-            json['partner_earning'] ??
-            json['delivery_charge'] ??
-            json['price'] ??
-            json['totalAmount'] ??
-            json['total_value'],
+      amount: DeliveryFee.formatFromJson(
+        json,
+        pickupLatitude: pickupLatitude,
+        pickupLongitude: pickupLongitude,
+        deliveryLatitude: deliveryLatitude,
+        deliveryLongitude: deliveryLongitude,
       ),
       description: _readString(json['description']),
-      notes: _readString(json['notes']),
+      notes: _readReturnNotes(json) ?? _readString(json['notes']),
+      returnNotes: _readReturnNotes(json),
       instructions: _readString(
         json['instructions'] ??
             json['delivery_instructions'] ??
@@ -559,20 +690,10 @@ class DpOrder {
             json['pickupInstructions'],
       ),
       weightKg: _readString(json['weight_kg'] ?? json['weightKg']),
-      pickupLatitude: _readDouble(json['pickup_latitude'] ?? json['pickupLatitude']),
-      pickupLongitude: _readDouble(json['pickup_longitude'] ?? json['pickupLongitude']),
-      deliveryLatitude: _readDouble(
-            json['delivery_latitude'] ??
-                json['deliveryLatitude'] ??
-                deliveryAddressMap?['latitude'],
-          ) ??
-          _readDouble(deliveryAddressMap?['lat']),
-      deliveryLongitude: _readDouble(
-            json['delivery_longitude'] ??
-                json['deliveryLongitude'] ??
-                deliveryAddressMap?['longitude'],
-          ) ??
-          _readDouble(deliveryAddressMap?['lng']),
+      pickupLatitude: pickupLatitude,
+      pickupLongitude: pickupLongitude,
+      deliveryLatitude: deliveryLatitude,
+      deliveryLongitude: deliveryLongitude,
       arrivedAtIapAt: _readString(json['arrived_at_iap_at']),
       pickupConfirmedAt: _readString(json['pickup_confirmed_at']),
       inTransitAt: _readString(json['in_transit_at']),
@@ -581,6 +702,8 @@ class DpOrder {
       completedAt: _readString(json['completed_at']),
       deliveryDate: _readDeliveryDate(json),
       deliveryTime: _readDeliveryTime(json),
+      returnDate: _readReturnDate(json),
+      returnTime: _readReturnTime(json),
       rejectionReason: _readString(
         json['rejection_reason'] ??
             json['rejectionReason'] ??
@@ -771,6 +894,341 @@ class DpOrder {
       json,
       fieldKeys: const ['delivery_time'],
     );
+  }
+
+  static String? _readReturnDate(Map<String, dynamic> json) {
+    final direct = _readString(
+      json['return_date'] ??
+          json['returnDate'] ??
+          json['requested_return_date'] ??
+          json['requestedReturnDate'] ??
+          json['return_scheduled_date'] ??
+          json['returnScheduledDate'],
+    );
+    if (direct != null) return _normalizeDateOnly(direct);
+
+    final mapsToCheck = [
+      _tryParseMap(json['return_request'] ?? json['returnRequest']),
+      _tryParseMap(json['return_details'] ?? json['returnDetails']),
+      _tryParseMap(json['returns']),
+    ];
+
+    for (final m in mapsToCheck) {
+      if (m != null) {
+        final val = _readString(
+          m['return_date'] ??
+              m['returnDate'] ??
+              m['requested_date'] ??
+              m['requestedDate'] ??
+              m['date'] ??
+              m['slot_date'] ??
+              m['slotDate'],
+        );
+        if (val != null) return _normalizeDateOnly(val);
+      }
+    }
+
+    final returnsList = json['returns'];
+    if (returnsList is List && returnsList.isNotEmpty) {
+      for (final item in returnsList) {
+        final itemMap = _tryParseMap(item);
+        if (itemMap != null) {
+          final val = _readString(
+            itemMap['return_date'] ??
+                itemMap['returnDate'] ??
+                itemMap['requested_date'] ??
+                itemMap['requestedDate'] ??
+                itemMap['date'],
+          );
+          if (val != null) return _normalizeDateOnly(val);
+        }
+      }
+    }
+
+    final kitReturnDate = _readKitDetailField(
+      json,
+      fieldKeys: const [
+        'return_date',
+        'returnDate',
+        'requested_return_date',
+        'requestedReturnDate',
+      ],
+    );
+    if (kitReturnDate != null) return _normalizeDateOnly(kitReturnDate);
+
+    final items = json['items'];
+    if (items is List && items.isNotEmpty) {
+      for (final item in items) {
+        final itemMap = _tryParseMap(item);
+        if (itemMap != null) {
+          final val = _readString(
+            itemMap['return_date'] ??
+                itemMap['returnDate'] ??
+                itemMap['requested_return_date'],
+          );
+          if (val != null) return _normalizeDateOnly(val);
+        }
+      }
+    }
+
+    final flow = _readString(json['flow_type'] ?? json['flowType'])?.toLowerCase();
+    final type = _readString(json['order_type'] ?? json['orderType'] ?? json['type'])?.toLowerCase();
+    final status = _readString(json['status'])?.toLowerCase();
+    final isReturn = flow == 'return' ||
+        (type != null && type.contains('return')) ||
+        (status != null && status.startsWith('return'));
+
+    if (isReturn) {
+      final pickupDate = _readString(json['pickup_date'] ?? json['pickupDate']);
+      if (pickupDate != null) return _normalizeDateOnly(pickupDate);
+
+      final sched = _readString(
+        json['scheduled_time'] ?? json['scheduledTime'] ?? json['scheduledAt'],
+      );
+      if (sched != null) {
+        final norm = _normalizeDateOnly(sched);
+        if (norm != null && norm.isNotEmpty) return norm;
+      }
+    }
+
+    return null;
+  }
+
+  static String? _readReturnTime(Map<String, dynamic> json) {
+    final direct = _readString(
+      json['return_time'] ??
+          json['returnTime'] ??
+          json['requested_return_time'] ??
+          json['requestedReturnTime'] ??
+          json['return_slot'] ??
+          json['returnSlot'] ??
+          json['return_scheduled_time'] ??
+          json['returnScheduledTime'],
+    );
+    if (direct != null) return _formatTimeDisplay(direct);
+
+    final mapsToCheck = [
+      _tryParseMap(json['return_request'] ?? json['returnRequest']),
+      _tryParseMap(json['return_details'] ?? json['returnDetails']),
+      _tryParseMap(json['returns']),
+    ];
+
+    for (final m in mapsToCheck) {
+      if (m != null) {
+        final val = _readString(
+          m['return_time'] ??
+              m['returnTime'] ??
+              m['requested_time'] ??
+              m['requestedTime'] ??
+              m['time'] ??
+              m['slot'] ??
+              m['return_slot'] ??
+              m['returnSlot'] ??
+              m['time_slot'] ??
+              m['timeSlot'],
+        );
+        if (val != null) return _formatTimeDisplay(val);
+      }
+    }
+
+    final returnsList = json['returns'];
+    if (returnsList is List && returnsList.isNotEmpty) {
+      for (final item in returnsList) {
+        final itemMap = _tryParseMap(item);
+        if (itemMap != null) {
+          final val = _readString(
+            itemMap['return_time'] ??
+                itemMap['returnTime'] ??
+                itemMap['requested_time'] ??
+                itemMap['time'] ??
+                itemMap['slot'] ??
+                itemMap['time_slot'],
+          );
+          if (val != null) return _formatTimeDisplay(val);
+        }
+      }
+    }
+
+    final kitReturnTime = _readKitDetailField(
+      json,
+      fieldKeys: const [
+        'return_time',
+        'returnTime',
+        'requested_return_time',
+        'requestedReturnTime',
+        'return_slot',
+        'returnSlot',
+        'time_slot',
+        'timeSlot',
+      ],
+    );
+    if (kitReturnTime != null) return _formatTimeDisplay(kitReturnTime);
+
+    final items = json['items'];
+    if (items is List && items.isNotEmpty) {
+      for (final item in items) {
+        final itemMap = _tryParseMap(item);
+        if (itemMap != null) {
+          final val = _readString(
+            itemMap['return_time'] ??
+                itemMap['returnTime'] ??
+                itemMap['return_slot'],
+          );
+          if (val != null) return _formatTimeDisplay(val);
+        }
+      }
+    }
+
+    final flow = _readString(json['flow_type'] ?? json['flowType'])?.toLowerCase();
+    final type = _readString(json['order_type'] ?? json['orderType'] ?? json['type'])?.toLowerCase();
+    final status = _readString(json['status'])?.toLowerCase();
+    final isReturn = flow == 'return' ||
+        (type != null && type.contains('return')) ||
+        (status != null && status.startsWith('return'));
+
+    if (isReturn) {
+      final pickupTime = _readString(
+        json['pickup_time'] ??
+            json['pickupTime'] ??
+            json['pickup_slot'] ??
+            json['pickupSlot'],
+      );
+      if (pickupTime != null) return _formatTimeDisplay(pickupTime);
+
+      final sched = _readString(
+        json['scheduled_time'] ?? json['scheduledTime'] ?? json['scheduledAt'],
+      );
+      if (sched != null) {
+        try {
+          final dt = DateTime.parse(sched).toLocal();
+          final hour = dt.hour > 12 ? dt.hour - 12 : (dt.hour == 0 ? 12 : dt.hour);
+          final minute = dt.minute.toString().padLeft(2, '0');
+          final period = dt.hour >= 12 ? 'PM' : 'AM';
+          return '$hour:$minute $period';
+        } catch (_) {}
+      }
+    }
+
+    return null;
+  }
+
+  static String? _readReturnNotes(Map<String, dynamic> json) {
+    final direct = _readString(
+      json['return_notes'] ??
+          json['returnNotes'] ??
+          json['customer_notes'] ??
+          json['customerNotes'] ??
+          json['return_reason'] ??
+          json['returnReason'],
+    );
+    if (direct != null) return direct;
+
+    final mapsToCheck = [
+      _tryParseMap(json['return_request'] ?? json['returnRequest']),
+      _tryParseMap(json['return_details'] ?? json['returnDetails']),
+      _tryParseMap(json['returns']),
+    ];
+
+    for (final m in mapsToCheck) {
+      if (m != null) {
+        final val = _readString(
+          m['notes'] ??
+              m['return_notes'] ??
+              m['returnNotes'] ??
+              m['customer_notes'] ??
+              m['customerNotes'] ??
+              m['reason'] ??
+              m['return_reason'] ??
+              m['returnReason'] ??
+              m['comment'] ??
+              m['comments'],
+        );
+        if (val != null) return val;
+      }
+    }
+
+    final returnsList = json['returns'];
+    if (returnsList is List && returnsList.isNotEmpty) {
+      for (final item in returnsList) {
+        final itemMap = _tryParseMap(item);
+        if (itemMap != null) {
+          final val = _readString(
+            itemMap['notes'] ??
+                itemMap['return_notes'] ??
+                itemMap['returnNotes'] ??
+                itemMap['reason'] ??
+                itemMap['comment'],
+          );
+          if (val != null) return val;
+        }
+      }
+    }
+
+    final kitNotes = _readKitDetailField(
+      json,
+      fieldKeys: const [
+        'return_notes',
+        'returnNotes',
+        'return_reason',
+        'returnReason',
+        'notes',
+        'reason',
+      ],
+    );
+    if (kitNotes != null) return kitNotes;
+
+    final items = json['items'];
+    if (items is List && items.isNotEmpty) {
+      for (final item in items) {
+        final itemMap = _tryParseMap(item);
+        if (itemMap != null) {
+          final val = _readString(
+            itemMap['return_notes'] ??
+                itemMap['returnNotes'] ??
+                itemMap['return_reason'] ??
+                itemMap['notes'] ??
+                itemMap['reason'],
+          );
+          if (val != null) return val;
+        }
+      }
+    }
+
+    final rootNotes = _readString(json['notes']);
+    if (rootNotes != null) return rootNotes;
+
+    final flow = _readString(json['flow_type'] ?? json['flowType'])?.toLowerCase();
+    final type = _readString(json['order_type'] ?? json['orderType'] ?? json['type'])?.toLowerCase();
+    final status = _readString(json['status'])?.toLowerCase();
+    final isReturn = flow == 'return' ||
+        (type != null && type.contains('return')) ||
+        (status != null && status.startsWith('return'));
+
+    if (isReturn) {
+      final reason = _readString(json['reason']);
+      if (reason != null && reason.toLowerCase() != 'null') return reason;
+    }
+
+    return null;
+  }
+
+  static String? _formatTimeDisplay(String? value) {
+    if (value == null) return null;
+    final text = value.trim();
+    if (text.isEmpty || text.toLowerCase() == 'null') return null;
+
+    final timeMatch = RegExp(r'^(\d{1,2}):(\d{2})(?::\d{2})?$').firstMatch(text);
+    if (timeMatch != null) {
+      final hour24 = int.tryParse(timeMatch.group(1)!);
+      final minute = timeMatch.group(2)!;
+      if (hour24 != null && hour24 >= 0 && hour24 < 24) {
+        final period = hour24 >= 12 ? 'PM' : 'AM';
+        final hour12 = hour24 == 0 ? 12 : (hour24 > 12 ? hour24 - 12 : hour24);
+        return '$hour12:$minute $period';
+      }
+    }
+
+    return text;
   }
 
   static String? _readKitDetailField(

@@ -87,16 +87,16 @@
     bool get _isDeliveryOrderType =>
         !_isReturnOrder && (_order?.isDeliveryOrderCard ?? false);
 
+    bool get _hasVisibleItemCheckboxes =>
+        (_order?.displayProducts.isNotEmpty ?? false);
+
     bool get _canConfirm {
       final hasPhoto = _photoProofs.any(
         (photo) => photo != null && photo.trim().isNotEmpty,
       );
       if (!hasPhoto) return false;
-
-      // Single product / grouped kit: photo proof is enough to enable action.
-      if (_itemChecked.length <= 1) return true;
-
-      return _itemChecked.every((check) => check);
+      if (!_hasVisibleItemCheckboxes) return true;
+      return _itemChecked.isNotEmpty && _itemChecked.every((checked) => checked);
     }
 
     bool get _canPerformNextAction {
@@ -239,7 +239,7 @@
 
     Future<void> _handleNextAction() async {
       final next = _journey.nextStep;
-      if (next == null) return;
+      if (next == null || !_canPerformNextAction) return;
 
       if (next.apiStatus == 'confirm_pickup' ||
           next.apiStatus == 'confirm_delivery') {
@@ -358,7 +358,7 @@
     }
 
     String get _instructionsTitle {
-      if (_isReturnOrder) return 'Return Instructions';
+      if (_isReturnOrder) return 'Return Notes & Instructions';
       return _isDeliveryOrderType
           ? 'Delivery Instructions'
           : 'Pickup Instructions';
@@ -1369,6 +1369,13 @@
       );
     }
     Widget _buildInstructions() {
+      final note = _order?.returnNotes?.trim() ?? _order?.notes?.trim();
+      final instructions = _order?.instructions?.trim();
+      final hasNote = note != null && note.isNotEmpty;
+      final hasInstructions = instructions != null &&
+          instructions.isNotEmpty &&
+          instructions != note;
+
       return Container(
         width: double.infinity,
         padding: EdgeInsets.all(20.w),
@@ -1387,14 +1394,56 @@
                 color: AppColours.primary,
               ),
             ),
-            SizedBox(height: 12.h),
-            Text(
-              _instructionsText,
-              style: CustomTextStyles.openSansRegular.copyWith(
-                fontSize: 13.fSize,
-
+            if (hasNote) ...[
+              SizedBox(height: 12.h),
+              if (_isReturnOrder)
+                Text(
+                  'Customer Return Notes:',
+                  style: CustomTextStyles.openSansSemiBold.copyWith(
+                    fontSize: 11.fSize,
+                    color: AppColours.hintcolor,
+                  ),
+                ),
+              SizedBox(height: 4.h),
+              Text(
+                note,
+                style: CustomTextStyles.openSansRegular.copyWith(
+                  fontSize: 13.fSize,
+                  color: AppColours.secondary,
+                ),
               ),
-            ),
+            ],
+            if (hasInstructions) ...[
+              SizedBox(height: hasNote ? 12.h : 8.h),
+              if (hasNote)
+                Text(
+                  'Instructions:',
+                  style: CustomTextStyles.openSansSemiBold.copyWith(
+                    fontSize: 11.fSize,
+                    color: AppColours.hintcolor,
+                  ),
+                ),
+              SizedBox(height: 4.h),
+              Text(
+                instructions,
+                style: CustomTextStyles.openSansRegular.copyWith(
+                  fontSize: 13.fSize,
+                  color: AppColours.secondary,
+                ),
+              ),
+            ],
+            if (!hasNote && !hasInstructions) ...[
+              SizedBox(height: 12.h),
+              Text(
+                _isReturnOrder
+                    ? 'No return notes provided'
+                    : 'No instructions provided',
+                style: CustomTextStyles.openSansRegular.copyWith(
+                  fontSize: 13.fSize,
+                  color: AppColours.hintcolor,
+                ),
+              ),
+            ],
           ],
         ),
       );
@@ -1535,13 +1584,7 @@
         maxHeight: 1280,
       );
       if (image != null) {
-        setState(() {
-          _photoProofs[index] = image.path;
-          // Keep item selection in sync when photo proof is added.
-          if (_itemChecked.length == 1) {
-            _itemChecked[0] = true;
-          }
-        });
+        setState(() => _photoProofs[index] = image.path);
       }
     }
 

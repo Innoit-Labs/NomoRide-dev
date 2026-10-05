@@ -10,6 +10,7 @@ import '../../../../core/utils/image_constant.dart';
 import '../../../../core/utils/custom_snack_bar.dart';
 import '../../../../core/widgets/app_shimmer.dart';
 import '../../../notifications/presentation/screens/notifications_screen.dart';
+import '../../../notifications/data/notifications_repository.dart';
 import '../../../profile/data/models/delivery_partner_profile.dart';
 import '../../../profile/data/profile_repository.dart';
 import '../../data/dashboard_repository.dart';
@@ -31,6 +32,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final DashboardRepository _dashboardRepository = DashboardRepository();
   final OrdersRepository _ordersRepository = OrdersRepository();
   final ProfileRepository _profileRepository = ProfileRepository();
+  final NotificationsRepository _notificationsRepository = NotificationsRepository();
 
   final Set<String> _updatingOrderNumbers = {};
   bool _isLoadingDashboard = true;
@@ -68,6 +70,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _dashboardError = null;
       _ordersError = null;
     });
+
+    _notificationsRepository.checkUnreadStatus();
 
     final dashboardFuture = _loadDashboardSafe();
     final ordersFuture = _loadOrdersSafe();
@@ -322,20 +326,49 @@ class _HomeScreenState extends State<HomeScreen> {
         SizedBox(width: 8.w),
 
         GestureDetector(
-          onTap: () {
-            Navigator.push(
+          onTap: () async {
+            await Navigator.push(
               context,
               MaterialPageRoute(
                 builder: (_) => const NotificationsScreen(),
               ),
             );
+            _notificationsRepository.checkUnreadStatus();
           },
           behavior: HitTestBehavior.opaque,
-          child: SvgPicture.asset(
-            IconConstant.notification,
-            width: 40.w,
-            height: 40.w,
-            fit: BoxFit.contain,
+          child: ValueListenableBuilder<bool>(
+            valueListenable: NotificationsRepository.hasUnreadNotifier,
+            builder: (context, hasUnread, child) {
+              return Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  child!,
+                  if (hasUnread)
+                    Positioned(
+                      top: 4.w,
+                      right: 4.w,
+                      child: Container(
+                        width: 9.w,
+                        height: 9.w,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF4B4B),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: Colors.black,
+                            width: 1.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+            child: SvgPicture.asset(
+              IconConstant.notification,
+              width: 40.w,
+              height: 40.w,
+              fit: BoxFit.contain,
+            ),
           ),
         ),
       ],
@@ -527,7 +560,7 @@ class _HomeScreenState extends State<HomeScreen> {
     required VoidCallback onAccept,
   }) {
     final orderIcon =
-        order.isDeliveryOrderCard ? IconConstant.delivery : IconConstant.pickup;
+        order.usesDeliveryIcon ? IconConstant.delivery : IconConstant.pickup;
 
     return Padding(
       padding: EdgeInsets.all(20.w),
@@ -634,6 +667,42 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: CustomTextStyles.openSansSemiBold.copyWith(
                       fontSize: 14.fSize,
                       color: AppColours.primary.withValues(alpha: 0.9),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          if (order.displayNotes != null && order.displayNotes!.isNotEmpty) ...[
+            SizedBox(height: 14.h),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.chat_bubble_outline_rounded,
+                  color: AppColours.primary,
+                  size: 16.h,
+                ),
+                SizedBox(width: 8.w),
+                Expanded(
+                  child: RichText(
+                    text: TextSpan(
+                      children: [
+                        TextSpan(
+                          text: order.isReturnFlow ? 'Return Notes: ' : 'Notes: ',
+                          style: CustomTextStyles.openSansSemiBold.copyWith(
+                            fontSize: 13.fSize,
+                            color: AppColours.primary,
+                          ),
+                        ),
+                        TextSpan(
+                          text: order.displayNotes!,
+                          style: CustomTextStyles.openSansRegular.copyWith(
+                            fontSize: 13.fSize,
+                            color: AppColours.secondary,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),

@@ -1,3 +1,5 @@
+import 'package:nomoride/features/home/data/models/delivery_fee.dart';
+
 class OrderBroadcastModel {
   final String orderId;
   final String orderNumber;
@@ -36,18 +38,26 @@ class OrderBroadcastModel {
   });
 
   factory OrderBroadcastModel.fromJson(Map<String, dynamic> json) {
-    double parsedEarning = 0.0;
-    final rawEarning = json['earning_amount'] ?? json['earningAmount'];
-    if (rawEarning is num) {
-      parsedEarning = rawEarning.toDouble();
-    } else if (rawEarning is String) {
-      parsedEarning = double.tryParse(rawEarning) ?? 0.0;
+    double? parseCoord(dynamic val) {
+      if (val is num) return val.toDouble();
+      if (val is String) return double.tryParse(val);
+      return null;
     }
 
-    String formatted = (json['formatted_earning'] ?? json['formattedEarning'] ?? '').toString().trim();
-    if (formatted.isEmpty) {
-      formatted = '₹${parsedEarning.toStringAsFixed(2)}';
-    }
+    final pickupLatitude = parseCoord(json['pickup_latitude'] ?? json['pickupLatitude']);
+    final pickupLongitude = parseCoord(json['pickup_longitude'] ?? json['pickupLongitude']);
+    final deliveryLatitude = parseCoord(json['delivery_latitude'] ?? json['deliveryLatitude']);
+    final deliveryLongitude = parseCoord(json['delivery_longitude'] ?? json['deliveryLongitude']);
+
+    final resolvedFee = DeliveryFee.formatFromJson(
+      json,
+      pickupLatitude: pickupLatitude,
+      pickupLongitude: pickupLongitude,
+      deliveryLatitude: deliveryLatitude,
+      deliveryLongitude: deliveryLongitude,
+    );
+    final parsedEarning = double.tryParse(resolvedFee ?? '') ?? 0.0;
+    final formatted = resolvedFee == null ? '₹0.00' : '₹$resolvedFee';
 
     int timer = 30;
     final rawTimer = json['timer_seconds'] ?? json['timerSeconds'];
@@ -75,12 +85,6 @@ class OrderBroadcastModel {
       timer = 30;
     }
 
-    double? parseCoord(dynamic val) {
-      if (val is num) return val.toDouble();
-      if (val is String) return double.tryParse(val);
-      return null;
-    }
-
     return OrderBroadcastModel(
       orderId: (json['order_id'] ?? json['orderId'] ?? json['id'] ?? '').toString(),
       orderNumber: (json['order_number'] ?? json['orderNumber'] ?? '').toString(),
@@ -89,11 +93,11 @@ class OrderBroadcastModel {
       earningAmount: parsedEarning,
       formattedEarning: formatted,
       pickupAddress: (json['pickup_address'] ?? json['pickupAddress'] ?? 'Pickup Location').toString(),
-      pickupLatitude: parseCoord(json['pickup_latitude'] ?? json['pickupLatitude']),
-      pickupLongitude: parseCoord(json['pickup_longitude'] ?? json['pickupLongitude']),
+      pickupLatitude: pickupLatitude,
+      pickupLongitude: pickupLongitude,
       deliveryAddress: (json['delivery_address'] ?? json['deliveryAddress'] ?? 'Delivery Location').toString(),
-      deliveryLatitude: parseCoord(json['delivery_latitude'] ?? json['deliveryLatitude']),
-      deliveryLongitude: parseCoord(json['delivery_longitude'] ?? json['deliveryLongitude']),
+      deliveryLatitude: deliveryLatitude,
+      deliveryLongitude: deliveryLongitude,
       customerName: (json['customer_name'] ?? json['customerName'] ?? '').toString(),
       customerMobile: (json['customer_mobile'] ?? json['customerMobile'] ?? '').toString(),
       timerSeconds: timer,

@@ -15,6 +15,38 @@ class NotificationsRepository {
 
   final http.Client _client;
 
+  /// Global reactive notifiers for unread notification status
+  static final ValueNotifier<bool> hasUnreadNotifier = ValueNotifier<bool>(false);
+  static final ValueNotifier<int> unreadCountNotifier = ValueNotifier<int>(0);
+
+  /// Updates reactive unread notifiers based on a list of notifications
+  static void updateUnreadStatus(List<NotificationModel> notifications) {
+    final unreadCount = notifications.where((n) => !n.isRead).length;
+    unreadCountNotifier.value = unreadCount;
+    hasUnreadNotifier.value = unreadCount > 0;
+  }
+
+  /// Clears reactive unread state locally
+  static void markAllLocallyRead() {
+    unreadCountNotifier.value = 0;
+    hasUnreadNotifier.value = false;
+  }
+
+  /// Silently checks unread notifications and updates [hasUnreadNotifier].
+  Future<bool> checkUnreadStatus() async {
+    if (!AuthSession.hasValidSession) {
+      hasUnreadNotifier.value = false;
+      unreadCountNotifier.value = 0;
+      return false;
+    }
+    try {
+      final list = await getNotifications();
+      return list.any((n) => !n.isRead);
+    } catch (_) {
+      return hasUnreadNotifier.value;
+    }
+  }
+
   /// Fetches all notifications for the authenticated delivery partner.
   Future<List<NotificationModel>> getNotifications() async {
     _ensureLoggedIn();
@@ -36,23 +68,90 @@ class NotificationsRepository {
       final success = json?['success'] as bool? ?? false;
 
       if (response.statusCode == 200 && success) {
+        List<NotificationModel> notifications = [];
         final rawData = json?['data'];
         if (rawData is List) {
-          return rawData
+          notifications = rawData
               .whereType<Map<String, dynamic>>()
               .map(NotificationModel.fromJson)
               .toList();
         } else if (rawData is Map<String, dynamic> && rawData['notifications'] is List) {
-          return (rawData['notifications'] as List)
+          notifications = (rawData['notifications'] as List)
               .whereType<Map<String, dynamic>>()
               .map(NotificationModel.fromJson)
               .toList();
         }
-        return [];
+        updateUnreadStatus(notifications);
+        return notifications;
       }
 
       throw ApiException(
         json?['message'] as String? ?? 'Failed to load notifications (${response.statusCode})',
+        statusCode: response.statusCode,
+      );
+    } on ApiException {
+      rethrow;
+    } on SocketException {
+      throw const ApiException('No internet connection. Please try again.');
+    } catch (e) {
+      if (e is ApiException) rethrow;
+      throw ApiException('Something went wrong. Please try again: $e');
+    }
+  }
+
+  /// Marks one or more notifications as read for the logged-in Delivery Partner.
+  ///
+  /// Endpoint: `PUT /mobile/v1/delivery_partners/notifications/mark-read`
+  ///
+  /// Headers:
+  /// ```http
+  /// Authorization: Bearer <DELIVERY_PARTNER_JWT_TOKEN>
+  /// Content-Type: application/json
+  /// ```
+  /// Body:
+  /// ```json
+  /// { "notificationIds": ["..."] }
+  /// ```
+  Future<bool> markNotificationsAsRead(List<String> notificationIds) async {
+    _ensureLoggedIn();
+    final validIds = notificationIds
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toList();
+
+    if (validIds.isEmpty) return true;
+
+    final uri = ApiConfig.markReadNotificationsUri;
+    _logRequest('PUT', uri);
+
+    final payload = jsonEncode({'notificationIds': validIds});
+
+    try {
+      final response = await _client.put(
+        uri,
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          ...AuthSession.authHeaders,
+        },
+        body: payload,
+      );
+
+      _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
+      final json = _tryParseJson(response.body);
+      final success = json?['success'] as bool? ?? (response.statusCode >= 200 && response.statusCode < 300);
+
+      if (response.statusCode == 200 && success) {
+        final currentCount = unreadCountNotifier.value;
+        final newCount = (currentCount - validIds.length).clamp(0, 999999);
+        unreadCountNotifier.value = newCount;
+        hasUnreadNotifier.value = newCount > 0;
+        return true;
+      }
+
+      throw ApiException(
+        json?['message'] as String? ?? 'Failed to mark notifications as read (${response.statusCode})',
         statusCode: response.statusCode,
       );
     } on ApiException {
@@ -100,6 +199,7 @@ class NotificationsRepository {
       final success = json?['success'] as bool? ?? false;
 
       if ((response.statusCode == 200 || response.statusCode == 204) && success) {
+        markAllLocallyRead();
         return true;
       }
 

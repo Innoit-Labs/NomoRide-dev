@@ -42,6 +42,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         _notifications = list;
         _errorMessage = null;
       });
+
+      // Automatically mark any unread notifications as read
+      _markUnreadAsReadSilently(list);
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -51,6 +54,47 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       if (mounted) {
         setState(() => _isLoading = false);
       }
+    }
+  }
+
+  Future<void> _markUnreadAsReadSilently(List<NotificationModel> list) async {
+    final unreadIds = list
+        .where((n) => !n.isRead && n.id.isNotEmpty)
+        .map((n) => n.id)
+        .toList();
+    if (unreadIds.isEmpty) return;
+
+    try {
+      await _repository.markNotificationsAsRead(unreadIds);
+      if (!mounted) return;
+      setState(() {
+        _notifications = _notifications.map((n) {
+          if (unreadIds.contains(n.id)) {
+            return n.copyWith(isRead: true);
+          }
+          return n;
+        }).toList();
+      });
+    } catch (e) {
+      debugPrint('[NotificationsScreen] Error auto-marking notifications as read: $e');
+    }
+  }
+
+  Future<void> _markSingleAsRead(NotificationModel item) async {
+    if (item.isRead || item.id.isEmpty) return;
+    try {
+      await _repository.markNotificationsAsRead([item.id]);
+      if (!mounted) return;
+      setState(() {
+        _notifications = _notifications.map((n) {
+          if (n.id == item.id) {
+            return n.copyWith(isRead: true);
+          }
+          return n;
+        }).toList();
+      });
+    } catch (e) {
+      debugPrint('[NotificationsScreen] Error marking single notification as read: $e');
     }
   }
 
@@ -230,38 +274,64 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       ),
       itemBuilder: (_, index) {
         final item = _notifications[index];
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.title,
-                    style: CustomTextStyles.openSansSemiBold.copyWith(
-                      fontSize: 14,
-                      color: AppColours.primary,
+        final bool isUnread = !item.isRead;
+        return InkWell(
+          onTap: isUnread ? () => _markSingleAsRead(item) : null,
+          borderRadius: BorderRadius.circular(8.w),
+          child: Padding(
+            padding: EdgeInsets.symmetric(vertical: 4.h),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (isUnread)
+                  Container(
+                    margin: EdgeInsets.only(top: 5.h, right: 8.w),
+                    width: 7.w,
+                    height: 7.w,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFE6C279),
+                      shape: BoxShape.circle,
                     ),
                   ),
-                  SizedBox(height: 4.h),
-                  Text(
-                    item.message,
-                    style: CustomTextStyles.openSansRegular.copyWith(
-                      fontSize: 12,
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          item.title,
+                          style: (isUnread
+                              ? CustomTextStyles.openSansBold
+                              : CustomTextStyles.openSansSemiBold)
+                              .copyWith(
+                            fontSize: 14,
+                            color: AppColours.primary,
+                          ),
+                        ),
+                        SizedBox(height: 4.h),
+                        Text(
+                          item.message,
+                          style: CustomTextStyles.openSansRegular.copyWith(
+                            fontSize: 12,
+                            color: isUnread ? Colors.white : Colors.white70,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ],
-              ),
+                ),
+                SizedBox(width: 10.w),
+                Text(
+                  item.formattedTime,
+                  style: CustomTextStyles.openSansRegular.copyWith(
+                    fontSize: 12,
+                    color: isUnread ? const Color(0xFFE6C279) : AppColours.grey,
+                  ),
+                ),
+              ],
             ),
-            SizedBox(width: 10.w),
-            Text(
-              item.formattedTime,
-              style: CustomTextStyles.openSansRegular.copyWith(
-                fontSize: 12,
-              ),
-            ),
-          ],
+          ),
         );
       },
     );
