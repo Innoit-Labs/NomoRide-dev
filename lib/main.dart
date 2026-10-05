@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:nomoride/core/network/session_guard.dart';
 import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/core/services/fcm_service.dart';
+import 'package:nomoride/core/services/socket_service.dart';
 import 'package:nomoride/core/services/waitlist_session.dart';
 import 'package:nomoride/routes/app_routes.dart';
 import 'package:nomoride/theme/theme_helper.dart';
@@ -15,6 +17,10 @@ Future<void> main() async {
   ]);
   await AuthSession.restore();
   await WaitlistSession.restore();
+  await FcmService.initialize();
+  if (AuthSession.hasValidSession) {
+    SocketService.instance.initAndConnect();
+  }
   runApp(const MyApp());
 }
 

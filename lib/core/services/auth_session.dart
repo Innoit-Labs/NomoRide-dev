@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:nomoride/core/services/onesignal_service.dart';
+import 'package:nomoride/core/services/socket_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class AuthSession {
@@ -85,6 +86,7 @@ class AuthSession {
     await prefs.remove(_keyRefreshToken);
 
     await OneSignalService.logout();
+    SocketService.instance.disconnect();
   }
 
   static Future<void> _clearMemoryOnly() async {

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -73,6 +74,99 @@ class OrdersRepository {
     }
   }
 
+  Future<Map<String, dynamic>> acceptBroadcastOrder(String orderId) async {
+    if (!AuthSession.hasValidSession) {
+      throw const ApiException('Please login to accept orders.');
+    }
+
+    final uri = ApiConfig.acceptBroadcastOrderUri;
+    _logRequest('POST', uri);
+
+    final payload = jsonEncode({'order_id': orderId.trim()});
+
+    try {
+      final response = await _client.post(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          ...AuthSession.authHeaders,
+        },
+        body: payload,
+      );
+
+      _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
+
+      final json = _tryParseJson(response.body);
+      final success = json?['success'] as bool? ?? (response.statusCode == 200);
+
+      if (response.statusCode == 200 && success) {
+        return (json?['data'] is Map<String, dynamic>)
+            ? (json!['data'] as Map<String, dynamic>)
+            : (json ?? <String, dynamic>{});
+      }
+
+      final message = json?['message'] as String? ??
+          'Order has already been claimed by another delivery partner.';
+      throw ApiException(message, statusCode: response.statusCode);
+    } on ApiException {
+      rethrow;
+    } on SocketException {
+      throw const ApiException('No internet connection. Please try again.');
+    } catch (e) {
+      if (e is ApiException) rethrow;
+      throw ApiException('Failed to accept order: $e');
+    }
+  }
+
+  Future<DpOrder> getOrderById(String idOrNumber) async {
+    final trimmed = idOrNumber.trim();
+    if (trimmed.isEmpty) {
+      throw const ApiException('Order identifier is missing.');
+    }
+    if (!AuthSession.hasValidSession) {
+      throw const ApiException('Please login to view order details.');
+    }
+
+    final uri = ApiConfig.singleOrderUri(trimmed);
+    _logRequest('GET', uri);
+
+    try {
+      final response = await _client.get(
+        uri,
+        headers: {
+          'Accept': 'application/json',
+          ...AuthSession.authHeaders,
+        },
+      );
+
+      _logResponse(response.statusCode, response.body);
+      await SessionGuard.ensureAuthorized(response);
+
+      final json = _tryParseJson(response.body);
+      final success = json?['success'] as bool? ?? false;
+
+      if ((response.statusCode == 200 || response.statusCode == 201) && success) {
+        final data = json?['data'];
+        if (data is Map<String, dynamic>) {
+          return DpOrder.fromJson(data);
+        }
+        throw const ApiException('Invalid order details response from server.');
+      }
+
+      final message = json?['message'] as String? ??
+          'Failed to load order details (${response.statusCode})';
+      throw ApiException(message, statusCode: response.statusCode);
+    } on ApiException {
+      rethrow;
+    } on SocketException {
+      throw const ApiException('No internet connection. Please try again.');
+    } catch (_) {
+      throw const ApiException('Something went wrong. Please try again.');
+    }
+  }
+
   Future<DpOrder> getDpOrderByNumber(String orderNumber) async {
     final orders = await getDpOrders();
     return orders.firstWhere(
@@ -82,12 +176,24 @@ class OrdersRepository {
   }
 
   /// Resolves the freshest order for the details screen.
-  /// Active assignments come from [getDpOrders]; completed/history orders
-  /// prefer the my-orders API so a stale active snapshot cannot downgrade them.
+  /// Uses dedicated single order endpoint first, then falls back to lists if needed.
   Future<DpOrder> refreshOrderDetails(
     DpOrder current, {
     bool preferHistorySource = false,
   }) async {
+    // 1. Try dedicated single order endpoint first: GET /mobile/v1/delivery_partners/orders/{id}
+    final identifier = current.orderNumber.trim().isNotEmpty
+        ? current.orderNumber.trim()
+        : (current.id?.trim() ?? '');
+
+    if (identifier.isNotEmpty) {
+      try {
+        return await getOrderById(identifier);
+      } catch (e) {
+        debugPrint('[OrdersRepo] getOrderById failed ($e), falling back');
+      }
+    }
+
     final historyPreferred =
         preferHistorySource || current.journey.isCompleted;
 
@@ -109,8 +215,10 @@ class OrdersRepository {
       return current;
     }
 
-    final fromMyOrders = await _findInMyOrders(current);
-    if (fromMyOrders != null) return fromMyOrders;
+    if (!historyPreferred) {
+      final fromMyOrders = await _findInMyOrders(current);
+      if (fromMyOrders != null) return fromMyOrders;
+    }
 
     return current;
   }
@@ -511,7 +619,20 @@ class OrdersRepository {
   void _logResponse(int statusCode, String body) {
     debugPrint('========== ORDERS API RESPONSE ==========');
     debugPrint('Status: $statusCode');
-    debugPrint('Body: $body');
+    debugPrint('Body:');
+    try {
+      final decoded = jsonDecode(body);
+      final pretty = const JsonEncoder.withIndent('  ').convert(decoded);
+      for (final line in pretty.split('\n')) {
+        debugPrint(line);
+      }
+    } catch (_) {
+      final pattern = RegExp('.{1,800}');
+      for (final match in pattern.allMatches(body)) {
+        debugPrint(match.group(0));
+      }
+    }
+    developer.log(body, name: 'ORDERS_API');
     debugPrint('=========================================');
   }
 }

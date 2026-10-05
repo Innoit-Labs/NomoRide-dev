@@ -7,6 +7,7 @@ import '../../../../theme/theme_helper.dart';
 import '../../../../routes/app_routes.dart';
 import '../../../../core/utils/size_utils.dart';
 import '../../../../core/utils/image_constant.dart';
+import '../../../../core/utils/custom_snack_bar.dart';
 import '../../../../core/widgets/app_shimmer.dart';
 import '../../../notifications/presentation/screens/notifications_screen.dart';
 import '../../../profile/data/models/delivery_partner_profile.dart';
@@ -18,6 +19,9 @@ import '../../data/orders_repository.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  static final ValueNotifier<bool> isHomeLoadingNotifier =
+      ValueNotifier<bool>(true);
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -38,10 +42,18 @@ class _HomeScreenState extends State<HomeScreen> {
   DashboardData? _dashboardData;
   List<DpOrder> _orders = [];
 
+  bool get _isLoading => _isLoadingDashboard || _isLoadingOrders;
+
   @override
   void initState() {
     super.initState();
     _loadHomeData();
+  }
+
+  @override
+  void dispose() {
+    HomeScreen.isHomeLoadingNotifier.value = false;
+    super.dispose();
   }
 
   Future<void> _loadHomeData({bool forceRefreshProfile = false}) async {
@@ -49,6 +61,7 @@ class _HomeScreenState extends State<HomeScreen> {
     debugPrint('authToken: ${AuthSession.authToken}');
     debugPrint('========================================');
 
+    HomeScreen.isHomeLoadingNotifier.value = true;
     setState(() {
       _isLoadingDashboard = true;
       _isLoadingOrders = true;
@@ -91,6 +104,8 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       _isLoadingOrders = false;
     });
+
+    HomeScreen.isHomeLoadingNotifier.value = false;
   }
 
   Future<Object?> _loadDashboardSafe() async {
@@ -142,12 +157,7 @@ class _HomeScreenState extends State<HomeScreen> {
       });
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(error.toString()),
-          backgroundColor: Colors.red.shade800,
-        ),
-      );
+      CustomSnackBar.showError(context, error.toString());
     } finally {
       if (mounted) {
         setState(() => _updatingOrderNumbers.remove(order.orderNumber));
@@ -247,6 +257,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildHeader() {
+    if (_isLoading) {
+      return const HomeHeaderShimmer();
+    }
+
     final photoUrl = _partnerPhotoUrl?.trim();
     final hasPhoto = photoUrl != null && photoUrl.isNotEmpty;
 
@@ -769,9 +783,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!launched && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to open maps.')),
-      );
+      CustomSnackBar.showWarning(context, 'Unable to open maps.');
     }
   }
 

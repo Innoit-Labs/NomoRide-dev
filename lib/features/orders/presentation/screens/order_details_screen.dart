@@ -7,6 +7,7 @@
   import 'package:nomoride/core/utils/icon_constant.dart';
   import 'package:nomoride/features/home/data/models/dp_order.dart';
   import 'package:nomoride/features/home/data/models/dp_order_product.dart';
+  import 'package:nomoride/features/home/data/models/order_item_section.dart';
   import 'package:nomoride/features/home/data/models/order_journey.dart';
   import 'package:nomoride/features/home/data/orders_repository.dart';
   import 'package:nomoride/features/profile/data/profile_repository.dart';
@@ -14,6 +15,7 @@
   import '../../../../theme/theme_helper.dart';
   import '../../../../routes/app_routes.dart';
   import '../../../../core/utils/size_utils.dart';
+  import '../../../../core/utils/custom_snack_bar.dart';
   import 'package:dotted_border/dotted_border.dart';
 
   class OrderDetailsScreen extends StatefulWidget {
@@ -46,6 +48,11 @@
         final order = args['order'];
         if (order is DpOrder) {
           _order = order;
+        } else {
+          final id = (args['id'] ?? args['orderId'] ?? args['orderNumber'])?.toString();
+          if (id != null && id.isNotEmpty) {
+            _order = DpOrder(orderNumber: id, id: id, status: '');
+          }
         }
         _preferHistorySource = args['isInTransit'] == false;
         _enableWorkflow = args['enableWorkflow'] == true;
@@ -54,7 +61,9 @@
       _syncSelectionState(_order);
       _argsLoaded = true;
 
-      WidgetsBinding.instance.addPostFrameCallback((_) => _refreshOrder());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _refreshOrder(showLoading: _order == null);
+      });
     }
 
     void _syncSelectionState(DpOrder? order) {
@@ -103,15 +112,10 @@
 
       if (showLoading) setState(() => _isRefreshing = true);
       try {
-        final profileFuture = ProfileRepository().getProfile().then(
-          (_) {},
-          onError: (_) {},
-        );
         final refreshed = await _ordersRepository.refreshOrderDetails(
           order,
           preferHistorySource: _preferHistorySource,
         );
-        await profileFuture;
         if (mounted) {
           setState(() {
             _order = refreshed;
@@ -122,18 +126,23 @@
         if (!mounted) return;
         final message =
             error is ApiException ? error.message : error.toString();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(message),
-            backgroundColor: Colors.red.shade800,
-          ),
-        );
+        CustomSnackBar.showError(context, message);
       } finally {
         if (mounted && showLoading) setState(() => _isRefreshing = false);
       }
     }
 
     Future<void> _syncOrderAfterUpdate(DpOrder fallback) async {
+      // If the update returned populated order items/journey, apply directly without an extra network roundtrip.
+      if (fallback.displayProducts.isNotEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _order = fallback;
+          _syncSelectionState(fallback);
+        });
+        return;
+      }
+
       final refreshed = await _ordersRepository.refreshOrderDetails(
         fallback,
         preferHistorySource: _preferHistorySource,
@@ -203,12 +212,7 @@
         }
 
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(message),
-            backgroundColor: Colors.red.shade800,
-          ),
-        );
+        CustomSnackBar.showError(context, message);
       } finally {
         if (mounted) setState(() => _isUpdating = false);
       }
@@ -379,9 +383,7 @@
       final launched =
           await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!launched && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Unable to open maps.')),
-        );
+        CustomSnackBar.showWarning(context, 'Unable to open maps.');
       }
     }
 
@@ -389,9 +391,7 @@
       final phone = _order?.customerPhone?.trim();
       if (phone == null || phone.isEmpty) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Customer phone number is not available.')),
-        );
+        CustomSnackBar.showWarning(context, 'Customer phone number is not available.');
         return;
       }
 
@@ -399,9 +399,7 @@
       final launched =
           await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!launched && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Unable to place the call.')),
-        );
+        CustomSnackBar.showWarning(context, 'Unable to place the call.');
       }
     }
 
@@ -854,6 +852,93 @@
       );
     }
 
+    Widget _buildCategorySectionHeader(OrderProductSection section) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 3.5.w,
+                height: 15.h,
+                decoration: BoxDecoration(
+                  color: AppColours.primary,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              SizedBox(width: 8.w),
+              Text(
+                section.title.toUpperCase(),
+                style: CustomTextStyles.montserratBold.copyWith(
+                  fontSize: 12.fSize,
+                  letterSpacing: 0.8,
+                  color: AppColours.primary,
+                ),
+              ),
+            ],
+          ),
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: 10.w, vertical: 3.5.h),
+            decoration: BoxDecoration(
+              color: AppColours.primary.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: AppColours.primary.withValues(alpha: 0.35),
+                width: 1,
+              ),
+            ),
+            child: Text(
+              section.itemsLabel,
+              style: CustomTextStyles.openSansSemiBold.copyWith(
+                fontSize: 11.fSize,
+                color: AppColours.primary,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    Widget _buildCategorySectionCard(
+      OrderProductSection section,
+      int startingCardIndex,
+    ) {
+      return Container(
+        width: double.infinity,
+        padding: EdgeInsets.all(16.w),
+        decoration: BoxDecoration(
+          color: const Color(0xFF16161B),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: AppColours.primary.withValues(alpha: 0.3),
+            width: 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildCategorySectionHeader(section),
+            SizedBox(height: 16.h),
+            for (var i = 0; i < section.products.length; i++) ...[
+              if (i > 0) ...[
+                SizedBox(height: 14.h),
+                Divider(
+                  color: AppColours.primary.withValues(alpha: 0.15),
+                  height: 1,
+                ),
+                SizedBox(height: 14.h),
+              ],
+              _buildItemCard(
+                startingCardIndex + i,
+                section.products[i],
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+
     Widget _buildProductsList(DpOrder order) {
       final sections = order.productSections;
       if (sections.isEmpty) {
@@ -866,20 +951,10 @@
       for (var sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
         final section = sections[sectionIndex];
         if (sectionIndex > 0) {
-          children.add(SizedBox(height: 24.h));
+          children.add(SizedBox(height: 16.h));
         }
-        children.add(_buildSectionHeader(section.title, section.itemsLabel));
-        children.add(SizedBox(height: 16.h));
-
-        for (var productIndex = 0;
-            productIndex < section.products.length;
-            productIndex++) {
-          if (productIndex > 0) {
-            children.add(SizedBox(height: 16.h));
-          }
-          children.add(_buildItemCard(cardIndex, section.products[productIndex]));
-          cardIndex++;
-        }
+        children.add(_buildCategorySectionCard(section, cardIndex));
+        cardIndex += section.products.length;
       }
 
       return Column(
@@ -917,6 +992,20 @@
                           color: AppColours.secondary,
                         ),
                       ),
+                    if (product.kitType != null &&
+                        product.name != null &&
+                        product.name!.trim().isNotEmpty &&
+                        product.name!.trim().toLowerCase() !=
+                            product.kitType!.trim().toLowerCase()) ...[
+                      SizedBox(height: 2.h),
+                      Text(
+                        product.name!,
+                        style: CustomTextStyles.openSansRegular.copyWith(
+                          fontSize: 12.fSize,
+                          color: AppColours.hintcolor,
+                        ),
+                      ),
+                    ],
                     if (garmentLabel != null) ...[
                       SizedBox(height: 4.h),
                       Text(
@@ -927,37 +1016,38 @@
                         ),
                       ),
                     ],
-                    if (product.isKidsEssentialsSection && items.isEmpty) ...[
+                    if (product.isKidsEssentialsSection) ...[
                       SizedBox(height: 6.h),
                       _buildNonReturnableBadge(),
                     ],
                   ],
                 ),
               ),
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    if (expanded) {
-                      _expandedProductIndexes.remove(index);
-                    } else {
-                      _expandedProductIndexes.add(index);
-                    }
-                  });
-                },
-                behavior: HitTestBehavior.opaque,
-                child: Padding(
-                  padding: EdgeInsets.all(4.w),
-                  child: AnimatedRotation(
-                    turns: expanded ? 0.5 : 0,
-                    duration: const Duration(milliseconds: 180),
-                    child: Icon(
-                      Icons.keyboard_arrow_down_rounded,
-                      color: AppColours.primary,
-                      size: 28.h,
+              if (product.canExpand)
+                GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      if (expanded) {
+                        _expandedProductIndexes.remove(index);
+                      } else {
+                        _expandedProductIndexes.add(index);
+                      }
+                    });
+                  },
+                  behavior: HitTestBehavior.opaque,
+                  child: Padding(
+                    padding: EdgeInsets.all(4.w),
+                    child: AnimatedRotation(
+                      turns: expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 180),
+                      child: Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        color: AppColours.primary,
+                        size: 28.h,
+                      ),
                     ),
                   ),
                 ),
-              ),
               if (_enableWorkflow && _journey.requiresConfirmation) ...[
                 SizedBox(width: 8.w),
                 GestureDetector(
@@ -990,14 +1080,15 @@
               ],
             ],
           ),
-          AnimatedCrossFade(
-            firstChild: const SizedBox(width: double.infinity),
-            secondChild: _buildExpandedGarmentList(items),
-            crossFadeState: expanded
-                ? CrossFadeState.showSecond
-                : CrossFadeState.showFirst,
-            duration: const Duration(milliseconds: 200),
-          ),
+          if (product.canExpand)
+            AnimatedCrossFade(
+              firstChild: const SizedBox(width: double.infinity),
+              secondChild: _buildExpandedGarmentList(items),
+              crossFadeState: expanded
+                  ? CrossFadeState.showSecond
+                  : CrossFadeState.showFirst,
+              duration: const Duration(milliseconds: 200),
+            ),
         ],
       );
     }
@@ -1034,7 +1125,7 @@
       return Container(
         padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 10.h),
         decoration: BoxDecoration(
-          color: const Color(0xFF141419),
+          color: const Color(0xFF0F0F12),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: AppColours.primary.withValues(alpha: 0.2)),
         ),
@@ -1607,11 +1698,7 @@
                         onPressed: () {
                           final reason = reasonController.text.trim();
                           if (reason.isEmpty) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Please enter a rejection reason.'),
-                              ),
-                            );
+                            CustomSnackBar.showWarning(context, 'Please enter a rejection reason.');
                             return;
                           }
                           Navigator.pop(dialogContext, true);
@@ -1935,28 +2022,16 @@
                             'Yes, Confirm',
                             onPressed: () {
                               if (failedPhotoPath == null || failedPhotoPath!.trim().isEmpty) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Please upload a proof photo.'),
-                                  ),
-                                );
+                                CustomSnackBar.showWarning(context, 'Please upload a proof photo.');
                                 return;
                               }
                               if (!waited10mins) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Please confirm you have waited at least 10 minutes.'),
-                                  ),
-                                );
+                                CustomSnackBar.showWarning(context, 'Please confirm you have waited at least 10 minutes.');
                                 return;
                               }
                               final reason = reasonController.text.trim();
                               if (reason.isEmpty) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Please enter a failure reason.'),
-                                  ),
-                                );
+                                CustomSnackBar.showWarning(context, 'Please enter a failure reason.');
                                 return;
                               }
                               Navigator.pop(dialogContext, {

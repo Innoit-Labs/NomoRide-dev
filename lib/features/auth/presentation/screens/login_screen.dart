@@ -106,7 +106,7 @@ class LoginScreen extends StatelessWidget {
                       SizedBox(height: 12.h),
                       SizedBox(
                         width: double.maxFinite,
-                        height: 60.h,
+                        height: 44.h,
                         child: ElevatedButton(
                           onPressed: state.isButtonEnabled && !state.isLoading
                               ? () {
@@ -140,7 +140,7 @@ class LoginScreen extends StatelessWidget {
                                     color: state.isButtonEnabled
                                         ? Colors.black
                                         : Colors.black.withOpacity(0.5),
-                                    fontSize: 18.fSize,
+                                    fontSize: 16.fSize,
                                   ),
                                 ),
                         ),

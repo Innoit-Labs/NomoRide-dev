@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/core/services/socket_service.dart';
+import 'package:nomoride/core/widgets/app_shimmer.dart';
 import 'package:nomoride/routes/app_routes.dart';
 import '../../../orders/presentation/screens/orders_screen.dart';
 import '../../../profile/presentation/screens/profile_screen.dart';
@@ -16,12 +18,7 @@ class MainContainer extends StatefulWidget {
 
 class _MainContainerState extends State<MainContainer> {
   int _selectedIndex = 0;
-
-  final List<Widget> _screens = const [
-    HomeScreen(),
-    OrdersScreen(),
-    ProfileScreen(),
-  ];
+  final Set<int> _loadedTabs = {0};
 
   @override
   void initState() {
@@ -34,7 +31,10 @@ class _MainContainerState extends State<MainContainer> {
   Future<void> _ensureAuthenticated() async {
     await AuthSession.restore();
     if (!mounted) return;
-    if (AuthSession.hasValidSession) return;
+    if (AuthSession.hasValidSession) {
+      SocketService.instance.initAndConnect();
+      return;
+    }
 
     Navigator.pushNamedAndRemoveUntil(
       context,
@@ -47,30 +47,42 @@ class _MainContainerState extends State<MainContainer> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black87,
-      // Keep tab screens alive so Home does not re-fetch profile on every return.
+      // Keep activated tab screens alive without loading all tabs eagerly at startup.
       body: IndexedStack(
         index: _selectedIndex,
-        children: _screens,
+        children: [
+          _loadedTabs.contains(0) ? const HomeScreen() : const SizedBox.shrink(),
+          _loadedTabs.contains(1) ? const OrdersScreen() : const SizedBox.shrink(),
+          _loadedTabs.contains(2) ? const ProfileScreen() : const SizedBox.shrink(),
+        ],
       ),
-      bottomNavigationBar: Container(
-        margin: EdgeInsets.all(24.w),
-        height: 70.h,
-        decoration: BoxDecoration(
-          color: Colors.black87,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: AppColours.primary.withOpacity(0.2),
-            width: 1,
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
-          children: [
-            _buildNavItem(0, Icons.home_rounded, 'Home'),
-            _buildNavItem(1, Icons.assignment_outlined, 'My Orders'),
-            _buildNavItem(2, Icons.person_outline_rounded, 'Profile'),
-          ],
-        ),
+      bottomNavigationBar: ValueListenableBuilder<bool>(
+        valueListenable: HomeScreen.isHomeLoadingNotifier,
+        builder: (context, isHomeLoading, _) {
+          if (isHomeLoading && _selectedIndex == 0) {
+            return const HomeBottomBarShimmer();
+          }
+          return Container(
+            margin: EdgeInsets.all(24.w),
+            height: 70.h,
+            decoration: BoxDecoration(
+              color: Colors.black87,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: AppColours.primary.withValues(alpha: 0.2),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _buildNavItem(0, Icons.home_rounded, 'Home'),
+                _buildNavItem(1, Icons.assignment_outlined, 'My Orders'),
+                _buildNavItem(2, Icons.person_outline_rounded, 'Profile'),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -78,12 +90,19 @@ class _MainContainerState extends State<MainContainer> {
   Widget _buildNavItem(int index, IconData icon, String label) {
     bool isSelected = _selectedIndex == index;
     return GestureDetector(
-      onTap: () => setState(() => _selectedIndex = index),
+      onTap: () {
+        if (_selectedIndex != index) {
+          setState(() {
+            _selectedIndex = index;
+            _loadedTabs.add(index);
+          });
+        }
+      },
       child: Container(
         padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 8.h),
         decoration: isSelected
             ? BoxDecoration(
-                color: Colors.white.withOpacity(0.05),
+                color: Colors.white.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(12),
               )
             : null,

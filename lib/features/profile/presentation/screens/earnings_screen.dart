@@ -46,13 +46,7 @@ class _EarningsScreenState extends State<EarningsScreen> {
 
     try {
       // Earnings only — do not mix with withdrawal-requests on load.
-      final dataFuture = _repository.getEarnings();
-      final profileFuture = _profileRepository.getProfile().then(
-        (_) {},
-        onError: (_) {},
-      );
-      final data = await dataFuture;
-      await profileFuture;
+      final data = await _repository.getEarnings();
       if (!mounted) return;
       setState(() {
         _earnings = data;

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -137,7 +138,20 @@ class MyOrdersRepository {
   void _logResponse(int statusCode, String body) {
     debugPrint('========== MY ORDERS API RESPONSE ==========');
     debugPrint('Status: $statusCode');
-    debugPrint('Body: $body');
+    debugPrint('Body:');
+    try {
+      final decoded = jsonDecode(body);
+      final pretty = const JsonEncoder.withIndent('  ').convert(decoded);
+      for (final line in pretty.split('\n')) {
+        debugPrint(line);
+      }
+    } catch (_) {
+      final pattern = RegExp('.{1,800}');
+      for (final match in pattern.allMatches(body)) {
+        debugPrint(match.group(0));
+      }
+    }
+    developer.log(body, name: 'MY_ORDERS_API');
     debugPrint('============================================');
   }
 }
