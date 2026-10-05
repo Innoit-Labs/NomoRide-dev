@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:nomoride/core/config/api_config.dart';
 import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/features/notifications/data/notifications_repository.dart';
 
 /// Top-level background message handler for FCM.
 /// Must be annotated with @pragma('vm:entry-point') to be called when the app is in the background or terminated.
@@ -97,6 +98,8 @@ class FcmService {
         debugPrint('[FCMService] Title: ${message.notification?.title}');
         debugPrint('[FCMService] Body: ${message.notification?.body}');
         debugPrint('[FCMService] Data: ${message.data}');
+        NotificationsRepository.hasUnreadNotifier.value = true;
+        NotificationsRepository.unreadCountNotifier.value += 1;
       });
 
       // 7. Notification tap handling when app is opened from background

@@ -152,8 +152,8 @@ class _OrdersScreenState extends State<OrdersScreen>
                     controller: _tabController,
                     children: [
                       _buildOrderList('All'),
-                      _buildOrderList('Completed'),
                       _buildOrderList('In Transit'),
+                      _buildOrderList('Completed'),
                       _buildOrderList('Not Delivered'),
                       _buildOrderList('Pickup Failed'),
                     ],
@@ -205,57 +205,8 @@ class _OrdersScreenState extends State<OrdersScreen>
   }
 
   Widget _buildTabBar() {
-    return SizedBox(
-      height: 42.h,
-      child: TabBar(
-        controller: _tabController,
-        isScrollable: true,
-        tabAlignment: TabAlignment.start,
-        padding: EdgeInsets.symmetric(horizontal: 16.w),
-        labelPadding: EdgeInsets.symmetric(horizontal: 5.w),
-        indicator: BoxDecoration(
-          color: const Color(0xFF3A3225),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: const Color(0xFFE6C279),
-            width: 1.2,
-          ),
-        ),
-        indicatorSize: TabBarIndicatorSize.tab,
-        dividerColor: Colors.transparent,
-        labelColor: const Color(0xFFF5E6C8),
-        unselectedLabelColor: Colors.white60,
-        labelStyle: CustomTextStyles.montserratBold.copyWith(
-          fontSize: 13.fSize,
-        ),
-        unselectedLabelStyle: CustomTextStyles.openSansSemiBold.copyWith(
-          fontSize: 13.fSize,
-        ),
-        splashFactory: NoSplash.splashFactory,
-        overlayColor: WidgetStateProperty.all(Colors.transparent),
-        tabs: [
-          _buildTabPill('All'),
-          _buildTabPill('Completed'),
-          _buildTabPill('In Transit'),
-          _buildTabPill('Not Delivered'),
-          _buildTabPill('Pickup Failed'),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTabPill(String label) {
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: 14.w, vertical: 8.h),
-      decoration: BoxDecoration(
-        color: const Color(0xFF141419),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: Colors.white12,
-          width: 1,
-        ),
-      ),
-      child: Text(label),
+    return Center(
+      child: _OrderStatusTabs(controller: _tabController),
     );
   }
 
@@ -295,7 +246,7 @@ class _OrdersScreenState extends State<OrdersScreen>
     final statusLabel = _myOrdersStatusLabel(order);
     final isInTransit =
         !_isCompletedOrder(order) && !_isNotDeliveredOrder(order);
-    final orderType = order.isReturnFlow ? 'Return' : order.displayTitle;
+    final orderType = order.displayTitle;
     final dateText = _formatOrderDate(order);
 
     return InkWell(
@@ -404,6 +355,10 @@ class _OrdersScreenState extends State<OrdersScreen>
   }
 
   String _formatOrderDate(DpOrder order) {
+    if (order.isReturnFlow &&
+        order.formattedDeliverySchedule != 'Not scheduled') {
+      return order.formattedDeliverySchedule;
+    }
     final raw = order.completedAt ?? order.scheduledTime;
     if (raw == null || raw.isEmpty) return 'Not available';
 
@@ -419,5 +374,158 @@ class _OrdersScreenState extends State<OrdersScreen>
     final minute = date.minute.toString().padLeft(2, '0');
     final period = date.hour >= 12 ? 'PM' : 'AM';
     return '$day/$month/${date.year} , $hour:$minute $period';
+  }
+}
+
+class _OrderStatusTabs extends StatefulWidget {
+  const _OrderStatusTabs({required this.controller});
+
+  final TabController controller;
+
+  @override
+  State<_OrderStatusTabs> createState() => _OrderStatusTabsState();
+}
+
+class _OrderStatusTabsState extends State<_OrderStatusTabs> {
+  static const _labels = <String>[
+    'All',
+    'In Transit',
+    'Completed',
+    'Not Delivered',
+    'Pickup Failed',
+  ];
+
+  /// Width of the first three tabs, including the 16px side padding and 12px gaps.
+  static const _visibleWidth = 380.0;
+
+  static const _labelColor = Color(0xFFF5E6C8);
+
+  final List<GlobalKey> _tabKeys =
+      List<GlobalKey>.generate(_labels.length, (_) => GlobalKey());
+
+  int _visibleIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _visibleIndex = widget.controller.index;
+    widget.controller.addListener(_onTabChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _OrderStatusTabs oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onTabChanged);
+      widget.controller.addListener(_onTabChanged);
+      _visibleIndex = widget.controller.index;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onTabChanged);
+    super.dispose();
+  }
+
+  void _onTabChanged() {
+    final index = widget.controller.index;
+    if (index == _visibleIndex) return;
+    _visibleIndex = index;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _scrollSelectedIntoView(index);
+    });
+  }
+
+  void _scrollSelectedIntoView(int index) {
+    final target = _tabKeys[index].currentContext;
+    if (target == null) return;
+    Scrollable.ensureVisible(
+      target,
+      alignment: index == 0
+          ? 0
+          : (index == _labels.length - 1 ? 1 : 0.5),
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final viewport = MediaQuery.sizeOf(context).width - 32;
+    final width = viewport < _visibleWidth ? viewport : _visibleWidth;
+
+    return AnimatedBuilder(
+      animation: widget.controller,
+      builder: (context, _) {
+        final selectedIndex = widget.controller.index;
+        return Container(
+          width: width,
+          height: 44,
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: const Color(0xFF0F0F14),
+            borderRadius: BorderRadius.circular(41),
+            border: Border.all(
+              color: const Color(0xFFE6C27A),
+              width: 1,
+            ),
+          ),
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+            itemCount: _labels.length,
+            separatorBuilder: (context, index) => const SizedBox(width: 12),
+            itemBuilder: (context, index) {
+              return _buildTab(index, selectedIndex == index);
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTab(int index, bool selected) {
+    final isPrimarySlot = index < 3;
+    return GestureDetector(
+      key: _tabKeys[index],
+      behavior: HitTestBehavior.opaque,
+      onTap: () => widget.controller.animateTo(index),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: selected
+              ? const Color(0xFFE6C27A).withValues(alpha: 0.20)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(selected ? 36 : 24),
+        ),
+        child: SizedBox(
+          width: isPrimarySlot ? (index == 2 ? 106 : 109) : null,
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: selected || !isPrimarySlot ? 16 : 8,
+            ),
+            child: Center(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  _labels[index],
+                  maxLines: 1,
+                  textAlign: TextAlign.center,
+                  style: CustomTextStyles.openSansSemiBold.copyWith(
+                    fontSize: 14,
+                    height: 24 / 14,
+                    letterSpacing: 0,
+                    color: _labelColor.withValues(
+                      alpha: selected ? 1 : 0.35,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

@@ -41,6 +41,9 @@ class ApiConfig {
   static Uri get clearAllNotificationsUri =>
       Uri.parse('$baseUrl$_mobileDeliveryPartners/notifications/clear-all');
 
+  static Uri get markReadNotificationsUri =>
+      Uri.parse('$baseUrl$_mobileDeliveryPartners/notifications/mark-read');
+
   static Uri get acceptBroadcastOrderUri =>
       Uri.parse('$baseUrl$_mobileDeliveryPartners/acceptBroadcastOrder');
 

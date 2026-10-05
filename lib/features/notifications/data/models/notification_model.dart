@@ -17,6 +17,26 @@ class NotificationModel {
     this.rawCreatedAt,
   });
 
+  NotificationModel copyWith({
+    String? id,
+    String? title,
+    String? message,
+    int? recipients,
+    bool? isRead,
+    DateTime? createdAt,
+    String? rawCreatedAt,
+  }) {
+    return NotificationModel(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      message: message ?? this.message,
+      recipients: recipients ?? this.recipients,
+      isRead: isRead ?? this.isRead,
+      createdAt: createdAt ?? this.createdAt,
+      rawCreatedAt: rawCreatedAt ?? this.rawCreatedAt,
+    );
+  }
+
   factory NotificationModel.fromJson(Map<String, dynamic> json) {
     DateTime? parsedDate;
     final dateRaw = json['created_at'] ?? json['createdAt'] ?? json['time'];
@@ -26,8 +46,15 @@ class NotificationModel {
       } catch (_) {}
     }
 
-    final isReadRaw = json['is_read'] ?? json['isRead'];
-    final isRead = isReadRaw == true || isReadRaw == 1 || isReadRaw == '1';
+    final isReadRaw = json['is_read'] ??
+        json['isRead'] ??
+        json['read'] ??
+        json['is_viewed'] ??
+        json['isViewed'];
+    final isRead = isReadRaw == true ||
+        isReadRaw == 1 ||
+        isReadRaw == '1' ||
+        isReadRaw == 'true';
 
     final recipientsRaw = json['recipients'];
     int? recipients;
