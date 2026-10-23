@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:developer' as developer;
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -9,7 +8,9 @@ import 'package:nomoride/core/config/api_config.dart';
 import 'package:nomoride/core/network/api_exception.dart';
 import 'package:nomoride/core/network/session_guard.dart';
 import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/core/services/socket_service.dart';
 import 'package:nomoride/features/home/data/models/dp_order.dart';
+import 'package:nomoride/features/home/data/order_address_cache.dart';
 import 'package:nomoride/features/orders/data/my_orders_repository.dart';
 
 class OrdersRepository {
@@ -22,13 +23,13 @@ class OrdersRepository {
   final http.Client _client;
   final MyOrdersRepository _myOrdersRepository;
 
-  Future<List<DpOrder>> getDpOrders() async {
+  Future<List<DpOrder>> getDpOrders({bool log = true}) async {
     if (!AuthSession.hasValidSession) {
       throw const ApiException('Please login to view orders.');
     }
 
     final uri = ApiConfig.dpOrdersUri;
-    _logRequest('GET', uri);
+    if (log) _logRequest('GET', uri);
 
     try {
       final response = await _client.get(
@@ -39,7 +40,7 @@ class OrdersRepository {
         },
       );
 
-      _logResponse(response.statusCode, response.body);
+      if (log) _logResponse(response.statusCode, response.body);
       await SessionGuard.ensureAuthorized(response);
 
       final json = _tryParseJson(response.body);
@@ -48,7 +49,7 @@ class OrdersRepository {
       if (response.statusCode == 200 && success) {
         final data = json?['data'];
         if (data is List) {
-          return data
+          final orders = data
               .whereType<Map<String, dynamic>>()
               .map(DpOrder.fromJson)
               .where(
@@ -58,6 +59,7 @@ class OrdersRepository {
                     order.id!.isNotEmpty,
               )
               .toList();
+          return await _backfillMissingAddresses(orders);
         }
         throw const ApiException('Invalid orders response from server.');
       }
@@ -74,15 +76,116 @@ class OrdersRepository {
     }
   }
 
+  static final Map<String, DpOrder> _addressSourceCache = {};
+  static final Set<String> _addressLookupAttempted = {};
+  static final Set<String> _missingAddressReported = {};
+
+  static String? _realAddress(String? address) =>
+      DpOrder.isDummyAddress(address) ? null : address;
+
+  /// The backend sends "Customer Address" instead of the real address on some
+  /// orders, but every order carries the customer's `customerAddressId`.
+  /// Another order with the same id (often the return leg, where the customer
+  /// address is the pickup) usually has the real text.
+  Future<Map<String, String>> _customerAddressesById(
+    List<DpOrder> orders,
+  ) async {
+    final hubAddresses = {
+      for (final order in orders)
+        if (order.flowType?.trim().toLowerCase() != 'return' &&
+            order.pickupAddress != null)
+          order.pickupAddress!.trim().toLowerCase(),
+    };
+
+    final byId = <String, String>{};
+    for (final order in orders) {
+      final addressId = order.customerAddressId?.trim();
+      final address = _realAddress(order.customerAddress)?.trim();
+      if (addressId == null || addressId.isEmpty || address == null) continue;
+      if (hubAddresses.contains(address.toLowerCase())) continue;
+      byId.putIfAbsent(addressId, () => address);
+    }
+    await OrderAddressCache.rememberCustomerAddresses(byId);
+    return byId;
+  }
+
+  /// The list endpoint can omit or placeholder the customer address; fill it
+  /// from addresses seen on other orders, the broadcast, or the single order
+  /// endpoint (once per order so polling stays cheap).
+  Future<List<DpOrder>> _backfillMissingAddresses(List<DpOrder> orders) async {
+    final addressesById = await _customerAddressesById(orders);
+
+    return Future.wait(orders.map((order) async {
+      final id = order.id?.trim() ?? '';
+      var pickup = _realAddress(order.pickupAddress);
+      var drop = _realAddress(order.dropAddress);
+      if (pickup != null && drop != null) return order;
+
+      final isReturn = order.flowType?.trim().toLowerCase() == 'return';
+      final addressId = order.customerAddressId?.trim();
+      final known = addressesById[addressId] ??
+          await OrderAddressCache.customerAddressFor(addressId);
+      if (isReturn) {
+        pickup ??= known;
+      } else {
+        drop ??= known;
+      }
+
+      final saved = await OrderAddressCache.lookup(
+        orderId: id,
+        orderNumber: order.orderNumber,
+      );
+      pickup ??= _realAddress(saved.pickup);
+      drop ??= _realAddress(saved.drop);
+
+      if ((pickup == null || drop == null) && id.isNotEmpty) {
+        var source = _addressSourceCache[id];
+        if (source == null && _addressLookupAttempted.add(id)) {
+          try {
+            source = await getOrderById(id);
+            _addressSourceCache[id] = source;
+          } catch (e) {
+            debugPrint('[OrdersRepo] address lookup for $id failed ($e)');
+          }
+        }
+        if (source != null) {
+          pickup ??= _realAddress(source.pickupAddress);
+          drop ??= _realAddress(source.dropAddress);
+        }
+      }
+
+      if (drop == null &&
+          !isReturn &&
+          _missingAddressReported.add(order.orderNumber)) {
+        debugPrint(
+          '[OrdersRepo] ${order.orderNumber}: API sent no customer address',
+        );
+      }
+
+      final source = id.isNotEmpty ? _addressSourceCache[id] : null;
+      return order.copyWith(
+        pickupAddress: pickup,
+        dropAddress: drop,
+        rtoStatus: order.rtoStatus ?? source?.rtoStatus,
+        rtoDetails: (order.rtoDetails != null && order.rtoDetails!.hasAnyData)
+            ? order.rtoDetails
+            : source?.rtoDetails,
+        amount: order.amount ?? source?.amount,
+        completedAt: order.completedAt ?? source?.completedAt,
+        returnedToIapAt: order.returnedToIapAt ?? source?.returnedToIapAt,
+        rtoCompletedAt: order.rtoCompletedAt ?? source?.rtoCompletedAt,
+      );
+    }));
+  }
+
   Future<Map<String, dynamic>> acceptBroadcastOrder(String orderId) async {
     if (!AuthSession.hasValidSession) {
       throw const ApiException('Please login to accept orders.');
     }
 
     final uri = ApiConfig.acceptBroadcastOrderUri;
-    _logRequest('POST', uri);
-
     final payload = jsonEncode({'order_id': orderId.trim()});
+    _logRequest('POST', uri, body: payload);
 
     try {
       final response = await _client.post(
@@ -102,6 +205,7 @@ class OrdersRepository {
       final success = json?['success'] as bool? ?? (response.statusCode == 200);
 
       if (response.statusCode == 200 && success) {
+        SocketService.instance.notifyOrderUpdate();
         return (json?['data'] is Map<String, dynamic>)
             ? (json!['data'] as Map<String, dynamic>)
             : (json ?? <String, dynamic>{});
@@ -182,15 +286,17 @@ class OrdersRepository {
     bool preferHistorySource = false,
   }) async {
     // 1. Try dedicated single order endpoint first: GET /mobile/v1/delivery_partners/orders/{id}
-    final identifier = current.orderNumber.trim().isNotEmpty
-        ? current.orderNumber.trim()
-        : (current.id?.trim() ?? '');
+    final candidates = <String>[
+      if (current.id?.trim().isNotEmpty ?? false) current.id!.trim(),
+      if (current.orderNumber.trim().isNotEmpty) current.orderNumber.trim(),
+    ];
 
-    if (identifier.isNotEmpty) {
+    for (final identifier in candidates.toSet()) {
       try {
-        return await getOrderById(identifier);
+        final fetched = await getOrderById(identifier);
+        return _mergeOrders(current, fetched);
       } catch (e) {
-        debugPrint('[OrdersRepo] getOrderById failed ($e), falling back');
+        debugPrint('[OrdersRepo] getOrderById($identifier) failed ($e), falling back');
       }
     }
 
@@ -199,16 +305,17 @@ class OrdersRepository {
 
     if (historyPreferred) {
       final fromMyOrders = await _findInMyOrders(current);
-      if (fromMyOrders != null) return fromMyOrders;
+      if (fromMyOrders != null) return _mergeOrders(current, fromMyOrders);
       if (current.journey.isCompleted) return current;
     }
 
     try {
       final active = await getDpOrderByNumber(current.orderNumber);
-      if (historyPreferred && !active.journey.isCompleted) {
+      final merged = _mergeOrders(current, active);
+      if (historyPreferred && !merged.journey.isCompleted) {
         return current;
       }
-      return active;
+      return merged;
     } on ApiException {
       // Not in the active DP orders list — try my orders next.
     } catch (_) {
@@ -217,10 +324,73 @@ class OrdersRepository {
 
     if (!historyPreferred) {
       final fromMyOrders = await _findInMyOrders(current);
-      if (fromMyOrders != null) return fromMyOrders;
+      if (fromMyOrders != null) return _mergeOrders(current, fromMyOrders);
     }
 
     return current;
+  }
+
+  DpOrder _mergeOrders(DpOrder current, DpOrder fresh) {
+    return fresh.copyWith(
+      orderType: (fresh.orderType != null && fresh.orderType!.isNotEmpty)
+          ? fresh.orderType
+          : current.orderType,
+      flowType: (fresh.flowType != null && fresh.flowType!.isNotEmpty)
+          ? fresh.flowType
+          : current.flowType,
+      apiNextActionLabel: (fresh.apiNextActionLabel != null &&
+              fresh.apiNextActionLabel!.isNotEmpty)
+          ? fresh.apiNextActionLabel
+          : current.apiNextActionLabel,
+      customerName: (fresh.customerName != null && fresh.customerName!.isNotEmpty)
+          ? fresh.customerName
+          : current.customerName,
+      customerPhone: (fresh.customerPhone != null && fresh.customerPhone!.isNotEmpty)
+          ? fresh.customerPhone
+          : current.customerPhone,
+      pickupAddress: (fresh.pickupAddress != null &&
+              fresh.pickupAddress!.isNotEmpty &&
+              !DpOrder.isDummyAddress(fresh.pickupAddress))
+          ? fresh.pickupAddress
+          : current.pickupAddress,
+      dropAddress: (fresh.dropAddress != null &&
+              fresh.dropAddress!.isNotEmpty &&
+              !DpOrder.isDummyAddress(fresh.dropAddress))
+          ? fresh.dropAddress
+          : current.dropAddress,
+      scheduledTime: (fresh.scheduledTime != null && fresh.scheduledTime!.isNotEmpty)
+          ? fresh.scheduledTime
+          : current.scheduledTime,
+      returnDate: (fresh.returnDate != null && fresh.returnDate!.isNotEmpty)
+          ? fresh.returnDate
+          : current.returnDate,
+      returnTime: (fresh.returnTime != null && fresh.returnTime!.isNotEmpty)
+          ? fresh.returnTime
+          : current.returnTime,
+      returnNotes: (fresh.returnNotes != null && fresh.returnNotes!.isNotEmpty)
+          ? fresh.returnNotes
+          : current.returnNotes,
+      rtoStatus: (fresh.rtoStatus != null && fresh.rtoStatus!.isNotEmpty)
+          ? fresh.rtoStatus
+          : current.rtoStatus,
+      rtoDetails: (fresh.rtoDetails != null && fresh.rtoDetails!.hasAnyData)
+          ? fresh.rtoDetails
+          : current.rtoDetails,
+      amount: (fresh.amount != null && fresh.amount!.isNotEmpty)
+          ? fresh.amount
+          : current.amount,
+      completedAt: (fresh.completedAt != null && fresh.completedAt!.isNotEmpty)
+          ? fresh.completedAt
+          : current.completedAt,
+      returnedToIapAt:
+          (fresh.returnedToIapAt != null && fresh.returnedToIapAt!.isNotEmpty)
+              ? fresh.returnedToIapAt
+              : current.returnedToIapAt,
+      rtoCompletedAt:
+          (fresh.rtoCompletedAt != null && fresh.rtoCompletedAt!.isNotEmpty)
+              ? fresh.rtoCompletedAt
+              : current.rtoCompletedAt,
+    );
   }
 
   Future<DpOrder?> _findInMyOrders(DpOrder current) async {
@@ -290,6 +460,74 @@ class OrdersRepository {
     );
   }
 
+  /// RTO handover of an undelivered forward order at the IAP hub.
+  /// `POST order-status-update` with `status: rto_returned`.
+  Future<DpOrder> submitRtoReturn({
+    required DpOrder order,
+    String? notes,
+    List<String> photoPaths = const [],
+  }) async {
+    if (!AuthSession.hasValidSession) {
+      throw const ApiException('Please login to update order status.');
+    }
+    final id = order.id?.trim();
+    if (id == null || id.isEmpty) {
+      throw const ApiException('Order id is missing.');
+    }
+
+    const status = 'rto_returned';
+    final fields = <String, String>{'id': id, 'status': status};
+    final trimmedNotes = notes?.trim();
+    if (trimmedNotes != null && trimmedNotes.isNotEmpty) {
+      fields['notes'] = trimmedNotes;
+    }
+
+    final uri = ApiConfig.orderStatusUpdateUri;
+    try {
+      final http.Response response;
+      final photos = photoPaths
+          .map((path) => path.trim())
+          .where((path) => path.isNotEmpty)
+          .toSet();
+      if (photos.isNotEmpty) {
+        final request = http.MultipartRequest('POST', uri)
+          ..headers['Accept'] = 'application/json'
+          ..headers.addAll(AuthSession.authHeaders)
+          ..fields.addAll(fields);
+        for (final photo in photos) {
+          await _addImageFile(request, _photoFieldForStatus(status), photo);
+        }
+        _logMultipartRequest(request);
+        response = await http.Response.fromStream(await _client.send(request));
+      } else {
+        final body = jsonEncode(fields);
+        _logRequest('POST', uri, body: body);
+        response = await _client.post(
+          uri,
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            ...AuthSession.authHeaders,
+          },
+          body: body,
+        );
+      }
+      _logResponse(response.statusCode, response.body);
+      return _parseStatusUpdateResponse(
+        orderNumber: order.orderNumber,
+        status: status,
+        statusCode: response.statusCode,
+        body: response.body,
+      );
+    } on ApiException {
+      rethrow;
+    } on SocketException {
+      throw const ApiException('No internet connection. Please try again.');
+    } catch (_) {
+      throw const ApiException('Something went wrong. Please try again.');
+    }
+  }
+
   Map<String, String> _statusFields({
     required String id,
     required String orderNumber,
@@ -311,6 +549,7 @@ class OrdersRepository {
     final reason = rejectReason?.trim();
     if (reason != null && reason.isNotEmpty) {
       fields['reject_reason'] = reason;
+      fields['rejection_reason'] = reason;
       fields['reason'] = reason;
     }
 
@@ -482,6 +721,7 @@ class OrdersRepository {
 
     if (statusCode == 200 || statusCode == 201) {
       if (success || _isSuccessMessage(message)) {
+        SocketService.instance.notifyOrderUpdate();
         final data = json?['data'];
         if (data is Map<String, dynamic>) {
           return DpOrder.fromJson(data);
@@ -595,7 +835,6 @@ class OrdersRepository {
     debugPrint('========== ORDERS API REQUEST ==========');
     debugPrint('URL: $uri');
     debugPrint('Method: $method');
-    debugPrint('Headers: ${jsonEncode(AuthSession.authHeaders)}');
     if (body != null) debugPrint('Body: $body');
     debugPrint('========================================');
   }
@@ -604,13 +843,10 @@ class OrdersRepository {
     debugPrint('========== ORDERS API REQUEST ==========');
     debugPrint('URL: ${request.url}');
     debugPrint('Method: POST');
-    debugPrint('Content-Type: ${request.headers['content-type']}');
-    debugPrint('Headers: ${jsonEncode(AuthSession.authHeaders)}');
     debugPrint('Fields: ${jsonEncode(request.fields)}');
     for (final file in request.files) {
       debugPrint(
-        'File: ${file.field} | name=${file.filename} | '
-        'type=${file.contentType} | length=${file.length} bytes',
+        'File: ${file.field} | name=${file.filename} | length=${file.length} bytes',
       );
     }
     debugPrint('========================================');
@@ -620,19 +856,24 @@ class OrdersRepository {
     debugPrint('========== ORDERS API RESPONSE ==========');
     debugPrint('Status: $statusCode');
     debugPrint('Body:');
+    String text = body;
     try {
       final decoded = jsonDecode(body);
-      final pretty = const JsonEncoder.withIndent('  ').convert(decoded);
-      for (final line in pretty.split('\n')) {
+      text = const JsonEncoder.withIndent('  ').convert(decoded);
+    } catch (_) {}
+    // One line at a time, and split long lines so logcat does not cut the JSON
+    // or mix a second raw copy into the same print.
+    for (final line in text.split('\n')) {
+      const chunk = 800;
+      if (line.length <= chunk) {
         debugPrint(line);
+        continue;
       }
-    } catch (_) {
-      final pattern = RegExp('.{1,800}');
-      for (final match in pattern.allMatches(body)) {
-        debugPrint(match.group(0));
+      for (var i = 0; i < line.length; i += chunk) {
+        final end = i + chunk > line.length ? line.length : i + chunk;
+        debugPrint(line.substring(i, end));
       }
     }
-    developer.log(body, name: 'ORDERS_API');
     debugPrint('=========================================');
   }
 }

@@ -33,6 +33,7 @@
     bool _isUpdating = false;
     bool _preferHistorySource = false;
     bool _enableWorkflow = false;
+    final TextEditingController _rtoNotesController = TextEditingController();
     DpOrder? _order;
     late List<bool> _itemChecked;
     late List<String?> _photoProofs;
@@ -99,11 +100,33 @@
       return _itemChecked.isNotEmpty && _itemChecked.every((checked) => checked);
     }
 
+    /// Undelivered forward orders are closed with a single RTO handover.
+    bool get _isRtoHandover => _order?.isUndeliveredReturnToHub == true;
+
+    bool get _needsPhotoProof =>
+        !_isRtoHandover && _journey.requiresConfirmation;
+
     bool get _canPerformNextAction {
       final next = _journey.nextStep;
       if (next == null || _isUpdating) return false;
-      if (_journey.requiresConfirmation) return _canConfirm;
+      if (_isRtoHandover) return _rtoPhotoPaths.length == _photoProofs.length;
+      if (_needsPhotoProof) return _canConfirm;
       return true;
+    }
+
+    List<String> get _rtoPhotoPaths => _photoProofs
+        .whereType<String>()
+        .map((path) => path.trim())
+        .where((path) => path.isNotEmpty)
+        .toList();
+
+    String get _primaryActionLabel =>
+        _isRtoHandover ? 'Confirm Return to Hub' : _journey.nextActionLabel;
+
+    @override
+    void dispose() {
+      _rtoNotesController.dispose();
+      super.dispose();
     }
 
     Future<void> _refreshOrder({bool showLoading = true}) async {
@@ -120,6 +143,9 @@
           setState(() {
             _order = refreshed;
             _syncSelectionState(refreshed);
+            if (refreshed.isUndeliveredReturnToHub) {
+              _enableWorkflow = true;
+            }
           });
         }
       } catch (error) {
@@ -133,25 +159,36 @@
     }
 
     Future<void> _syncOrderAfterUpdate(DpOrder fallback) async {
-      // If the update returned populated order items/journey, apply directly without an extra network roundtrip.
-      if (fallback.displayProducts.isNotEmpty) {
-        if (!mounted) return;
+      // 1. Immediately apply the update response locally for instantaneous UI feedback.
+      if (mounted) {
         setState(() {
           _order = fallback;
           _syncSelectionState(fallback);
+          if (fallback.isUndeliveredReturnToHub) {
+            _enableWorkflow = true;
+          }
         });
-        return;
       }
 
-      final refreshed = await _ordersRepository.refreshOrderDetails(
-        fallback,
-        preferHistorySource: _preferHistorySource,
-      );
-      if (!mounted) return;
-      setState(() {
-        _order = refreshed;
-        _syncSelectionState(refreshed);
-      });
+      // 2. Fetch authoritative state from GET /mobile/v1/delivery_partners/orders/:id
+      // to sync final status and ui_labels.next_action_label.
+      try {
+        final refreshed = await _ordersRepository.refreshOrderDetails(
+          fallback,
+          preferHistorySource: _preferHistorySource,
+        );
+        if (mounted) {
+          setState(() {
+            _order = refreshed;
+            _syncSelectionState(refreshed);
+            if (refreshed.isUndeliveredReturnToHub) {
+              _enableWorkflow = true;
+            }
+          });
+        }
+      } catch (e) {
+        debugPrint('[OrderDetails] refreshOrderDetails failed after update: $e');
+      }
     }
 
     Future<void> _updateStatus({
@@ -193,12 +230,17 @@
         final currentOrder = _order;
         if (currentOrder == null) return;
 
-        if (status == 'delivery_success' || currentOrder.journey.isCompleted) {
+        if (status == 'delivery_success' ||
+            status == 'returned_to_iap' ||
+            currentOrder.journey.isCompleted) {
           Navigator.pushNamedAndRemoveUntil(
             context,
             AppRoutes.deliverySuccessScreen,
             (route) => route.settings.name == AppRoutes.mainContainer,
-            arguments: {'isPickup': false, 'isReturn': _isReturnOrder},
+            arguments: {
+              'isPickup': false,
+              'isReturn': _isReturnOrder || currentOrder.isUndeliveredReturnToHub,
+            },
           );
         }
       } catch (error) {
@@ -241,7 +283,10 @@
       final next = _journey.nextStep;
       if (next == null || !_canPerformNextAction) return;
 
-      if (next.apiStatus == 'confirm_pickup' ||
+      if (_order?.isUndeliveredReturnToHub == true) {
+        await _handleUndeliveredReturnAction();
+        return;
+      } else if (next.apiStatus == 'confirm_pickup' ||
           next.apiStatus == 'confirm_delivery') {
         if (_journey.requiresReturnConfirmation) {
           final isReturnPickup = next.apiStatus == 'confirm_pickup';
@@ -266,6 +311,42 @@
       );
     }
 
+    Future<void> _handleUndeliveredReturnAction() async {
+      final order = _order;
+      if (order == null || _isUpdating) return;
+
+      final confirmed = await _showConfirmReturnDialog(
+        context,
+        isReturnPickup: false,
+      );
+      if (confirmed != true || !mounted) return;
+
+      setState(() => _isUpdating = true);
+      try {
+        await _ordersRepository.submitRtoReturn(
+          order: order,
+          notes: _rtoNotesController.text,
+          photoPaths: _rtoPhotoPaths,
+        );
+        if (!mounted) return;
+        CustomSnackBar.showSuccess(context, 'Package returned to IAP hub.');
+        Navigator.pushNamedAndRemoveUntil(
+          context,
+          AppRoutes.deliverySuccessScreen,
+          (route) => route.settings.name == AppRoutes.mainContainer,
+          arguments: {'isPickup': false, 'isReturn': true},
+        );
+      } catch (error) {
+        if (!mounted) return;
+        CustomSnackBar.showError(
+          context,
+          error is ApiException ? error.message : error.toString(),
+        );
+      } finally {
+        if (mounted) setState(() => _isUpdating = false);
+      }
+    }
+
     List<String> _collectPhotoProofPaths(String status) {
       if (status != 'confirm_pickup' && status != 'confirm_delivery') {
         return const [];
@@ -281,22 +362,50 @@
     String get _locationAddress {
       final order = _order;
       if (order == null) return 'Address not available';
+      if (order.isUndeliveredReturnToHub) {
+        final rtoAddress = order.rtoReturnAddress;
+        if (rtoAddress != null && rtoAddress.isNotEmpty) return rtoAddress;
+        return order.pickupAddress ?? 'IAP hub address not available';
+      }
       if (_isReturnOrder) {
+        if (_journey.isCompleted) {
+          final cust = order.pickupAddress;
+          if (cust != null && cust.isNotEmpty && !DpOrder.isDummyAddress(cust)) {
+            return cust;
+          }
+          final drop = order.dropAddress;
+          if (drop != null && drop.isNotEmpty && !DpOrder.isDummyAddress(drop)) {
+            return drop;
+          }
+          return 'Customer return address not available';
+        }
         if (_journey.currentPhase == OrderPhase.returnToIap) {
           return order.dropAddress ?? 'IAP / warehouse address not available';
         }
         return order.pickupAddress ?? 'Customer return address not available';
       }
-      if (_isDeliveryOrderType) {
+      if (_journey.currentPhase == OrderPhase.delivery) {
         return order.dropAddress ?? 'Delivery address not available';
       }
-      return order.pickupAddress ?? 'Pickup address not available';
+      return order.pickupAddress ?? 'IAP hub address not available';
     }
 
     ({double? latitude, double? longitude}) get _locationCoordinates {
       final order = _order;
       if (order == null) return (latitude: null, longitude: null);
+      if (order.isUndeliveredReturnToHub) {
+        return (
+          latitude: order.rtoReturnLatitude ?? order.pickupLatitude,
+          longitude: order.rtoReturnLongitude ?? order.pickupLongitude,
+        );
+      }
       if (_isReturnOrder) {
+        if (_journey.isCompleted) {
+          return (
+            latitude: order.pickupLatitude,
+            longitude: order.pickupLongitude,
+          );
+        }
         if (_journey.currentPhase == OrderPhase.returnToIap) {
           return (
             latitude: order.deliveryLatitude,
@@ -308,7 +417,7 @@
           longitude: order.pickupLongitude,
         );
       }
-      if (_isDeliveryOrderType) {
+      if (_journey.currentPhase == OrderPhase.delivery) {
         return (
           latitude: order.deliveryLatitude,
           longitude: order.deliveryLongitude,
@@ -320,36 +429,55 @@
       );
     }
 
-    String get _instructionsText {
-      final text = _order?.displayInstructions;
-      if (text != null && text.isNotEmpty) return text;
-      return 'No instructions provided';
-    }
-
     String get _itemsSectionTitle {
+      if (_order?.isUndeliveredReturnToHub == true) {
+        return 'Garments To Return To Hub';
+      }
       if (_enableWorkflow && _journey.requiresConfirmation) {
         return 'Select Items *';
       }
       if (_isReturnOrder) return 'Items To Return';
-      return _isDeliveryOrderType ? 'Items To Deliver' : 'Items To Pickup';
+      return _journey.currentPhase == OrderPhase.delivery
+          ? 'Items To Deliver'
+          : 'Items To Collect From Hub';
     }
 
     String get _locationSectionTitle {
+      if (_order?.isUndeliveredReturnToHub == true) {
+        final hub = _order?.rtoHubName;
+        if (hub != null && hub.isNotEmpty) {
+          return 'Return to $hub';
+        }
+        return 'Return to IAP Partner Store (Hub)';
+      }
       if (_isReturnOrder) {
+        if (_journey.isCompleted) {
+          return 'Return Pickup Location';
+        }
         return _journey.currentPhase == OrderPhase.returnToIap
-            ? 'IAP / Warehouse'
+            ? 'IAP / Warehouse (Drop-off)'
             : 'Return Pickup Location';
       }
-      return _isDeliveryOrderType ? 'Delivery Details' : 'Pickup Location';
+      return _journey.currentPhase == OrderPhase.delivery
+          ? 'Delivery Location (Customer)'
+          : 'IAP Partner Store (Hub)';
     }
 
     String get _addressLabel {
+      if (_order?.isUndeliveredReturnToHub == true) {
+        return 'IAP PARTNER STORE ADDRESS';
+      }
       if (_isReturnOrder) {
+        if (_journey.isCompleted) {
+          return 'CUSTOMER RETURN ADDRESS';
+        }
         return _journey.currentPhase == OrderPhase.returnToIap
             ? 'IAP / WAREHOUSE ADDRESS'
             : 'CUSTOMER RETURN ADDRESS';
       }
-      return _isDeliveryOrderType ? 'DELIVERY ADDRESS' : 'PICKUP ADDRESS';
+      return _journey.currentPhase == OrderPhase.delivery
+          ? 'CUSTOMER DELIVERY ADDRESS'
+          : 'IAP PARTNER STORE ADDRESS';
     }
 
     String get _scheduleLabel {
@@ -394,8 +522,11 @@
         CustomSnackBar.showWarning(context, 'Customer phone number is not available.');
         return;
       }
+      await _callPhone(phone);
+    }
 
-      final uri = Uri(scheme: 'tel', path: phone);
+    Future<void> _callPhone(String phone) async {
+      final uri = Uri(scheme: 'tel', path: phone.trim());
       final launched =
           await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!launched && mounted) {
@@ -485,15 +616,9 @@
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    _buildOrderSummaryHeader(order),
+                    SizedBox(height: 16.h),
                     _buildCustomerDetails(),
-                    if (_journey.showIapReturnAddress) ...[
-                      SizedBox(height: 16.h),
-                      _buildHighlightedAddressCard(
-                        title: 'IAP / WAREHOUSE ADDRESS',
-                        address: order.dropAddress,
-                        fallback: 'IAP / warehouse address not available',
-                      ),
-                    ],
                     SizedBox(height: 24.h),
                     _buildSectionHeader(
                       _itemsSectionTitle,
@@ -544,6 +669,37 @@
                       label: _scheduleLabel,
                       value: order.formattedDeliverySchedule,
                     ),
+                    if (order.isUndeliveredReturnToHub) ...[
+                      if (order.rtoHubContactPerson != null ||
+                          order.rtoHubContactMobile != null) ...[
+                        SizedBox(height: 24.h),
+                        _buildDeliveryDetail(
+                          icon: Icons.person_outline,
+                          label: 'HUB CONTACT',
+                          value: [
+                            if (order.rtoHubContactPerson != null &&
+                                order.rtoHubContactPerson!.isNotEmpty)
+                              order.rtoHubContactPerson!,
+                            if (order.rtoHubContactMobile != null &&
+                                order.rtoHubContactMobile!.isNotEmpty)
+                              order.rtoHubContactMobile!,
+                          ].join('\n'),
+                          trailingIcon: order.rtoHubContactMobile != null &&
+                                  order.rtoHubContactMobile!.isNotEmpty
+                              ? SvgPicture.asset(IconConstant.phone)
+                              : null,
+                          onTrailingTap: order.rtoHubContactMobile != null &&
+                                  order.rtoHubContactMobile!.isNotEmpty
+                              ? () => _callPhone(order.rtoHubContactMobile!)
+                              : null,
+                        ),
+                      ],
+                    ],
+                    if (order.isUndeliveredReturnToHub ||
+                        _journey.currentPhase == OrderPhase.returnToIap) ...[
+                      SizedBox(height: 18.h),
+                      _buildNavigateToIapButton(),
+                    ],
                     SizedBox(height: 16.h),
                   ],
                 ),
@@ -556,7 +712,7 @@
                   children: [
                     SizedBox(height: 32.h),
                     _buildInstructions(),
-                    if (_enableWorkflow && _journey.requiresConfirmation) ...[
+                    if (_enableWorkflow && _needsPhotoProof) ...[
                       SizedBox(height: 32.h),
                       Text(
                         'Photo Proof *',
@@ -574,23 +730,46 @@
                         ],
                       ),
                     ],
+                    if (_enableWorkflow &&
+                        _isRtoHandover &&
+                        !_journey.isCompleted) ...[
+                      SizedBox(height: 32.h),
+                      _buildSectionLabel('Photo Proof *'),
+                      SizedBox(height: 16.h),
+                      Row(
+                        children: [
+                          Expanded(child: _buildPhotoUploadBox(0)),
+                          SizedBox(width: 16.w),
+                          Expanded(child: _buildPhotoUploadBox(1)),
+                        ],
+                      ),
+                      SizedBox(height: 24.h),
+                      _buildSectionLabel('Hub Handover Notes (Optional)'),
+                      SizedBox(height: 12.h),
+                      _buildRtoNotesField(),
+                    ],
                     SizedBox(height: 48.h),
                     if (_enableWorkflow &&
                         !_journey.isCompleted &&
                         !_journey.isRejected) ...[
+                      if (order.isUndeliveredReturnToHub) ...[
+                        _buildUndeliveredReturnBanner(),
+                        SizedBox(height: 20.h),
+                      ],
                       if (ProfileRepository.showsPartnerEarning) ...[
-                        _buildTotalFare(order.amount ?? '0'),
+                        _buildPartnerEarningSection(order),
                         SizedBox(height: 24.h),
                       ],
                       if (_journey.nextStep != null)
                         _buildPrimaryButton(
                           _isUpdating
                               ? 'Updating...'
-                              : _journey.nextActionLabel,
+                              : _primaryActionLabel,
                           onPressed:
                               _canPerformNextAction ? _handleNextAction : null,
                         ),
                       if (!_isReturnOrder &&
+                          !order.isUndeliveredReturnToHub &&
                           _journey.currentPhase == OrderPhase.delivery &&
                           _journey.nextStep != null &&
                           !_journey.isAwaitingDeliveryStart) ...[
@@ -616,7 +795,7 @@
                         !_journey.isCompleted &&
                         !_journey.isRejected) ...[
                       if (ProfileRepository.showsPartnerEarning)
-                        _buildTotalFare(order.amount ?? '0'),
+                        _buildPartnerEarningSection(order),
                     ] else if (_journey.isCompleted) ...[
                       _buildCompletedBanner(),
                     ] else if (_journey.isRejected) ...[
@@ -651,40 +830,76 @@
       );
     }
 
-    Widget _buildHighlightedAddressCard({
-      required String title,
-      required String? address,
-      required String fallback,
-    }) {
-      final value = address?.trim();
+    Widget _buildStatusHeaderBadge() {
+      final badge = _journey.statusBadgeInfo;
+      return Container(
+        padding: EdgeInsets.symmetric(horizontal: 5.w, vertical: 5.h),
+        decoration: BoxDecoration(
+          color: badge.backgroundColor,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: badge.color.withValues(alpha: 0.5),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(badge.icon, size: 13.h, color: badge.color),
+            SizedBox(width: 5.w),
+            Text(
+              badge.label,
+              style: CustomTextStyles.montserratBold.copyWith(
+                fontSize: 11.fSize,
+                color: badge.color,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget _buildOrderSummaryHeader(DpOrder order) {
       return Container(
         width: double.infinity,
-        padding: EdgeInsets.all(16.w),
+        padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 12.h),
         decoration: BoxDecoration(
           color: const Color(0xFF1A1A1F),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColours.primary.withValues(alpha: 0.6)),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: AppColours.primary.withValues(alpha: 0.4),
+            width: 0.8,
+          ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          runSpacing: 8.h,
           children: [
-            Text(
-              title,
-              style: CustomTextStyles.openSansRegular.copyWith(
-                fontSize: 11.fSize,
-                color: AppColours.hintcolor,
-                letterSpacing: 0.8,
-              ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'ORDER NUMBER',
+                  style: CustomTextStyles.openSansRegular.copyWith(
+                    fontSize: 10.fSize,
+                    color: AppColours.hintcolor,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+                SizedBox(height: 2.h),
+                Text(
+                  order.orderNumber,
+                  style: CustomTextStyles.montserratBold.copyWith(
+                    fontSize: 14.fSize,
+                    color: AppColours.secondary,
+                  ),
+                ),
+              ],
             ),
-            SizedBox(height: 8.h),
-            Text(
-              value?.isNotEmpty == true ? value! : fallback,
-              style: CustomTextStyles.openSansSemiBold.copyWith(
-                fontSize: 14.fSize,
-                color: AppColours.secondary,
-                height: 1.4,
-              ),
-            ),
+            SizedBox(width:5),
+            _buildStatusHeaderBadge(),
           ],
         ),
       );
@@ -758,10 +973,18 @@
 
     String get _completedBannerLabel {
       final status = _order?.status.toLowerCase().trim() ?? '';
+      if (_order?.isNotDelivered == true ||
+          status == 'not_delivered' ||
+          status == 'not delivered') {
+        return 'Not Delivered';
+      }
+      if (_isReturnOrder) {
+        return 'Return Success';
+      }
       if (status == 'completed' || status == 'delivered') {
         return 'Delivery Success';
       }
-      if (status == 'returned_to_iap') {
+      if (status == 'returned_to_iap' || _order?.isReturnedToIap == true) {
         return 'Return Success';
       }
       return _journey.statusSummary;
@@ -771,7 +994,7 @@
       final status = _order?.status.toLowerCase().trim();
       final label = _isReturnOrder
           ? 'Return Failed'
-          : (status == 'not_delivered' ? 'Not Delivered' : 'Order Rejected');
+          : (status == 'not_delivered' ? 'Delivery Failed' : 'Order Rejected');
       final reason = _order?.rejectionReason?.trim();
       final hasReason = reason != null && reason.isNotEmpty;
       return Container(
@@ -992,20 +1215,6 @@
                           color: AppColours.secondary,
                         ),
                       ),
-                    if (product.kitType != null &&
-                        product.name != null &&
-                        product.name!.trim().isNotEmpty &&
-                        product.name!.trim().toLowerCase() !=
-                            product.kitType!.trim().toLowerCase()) ...[
-                      SizedBox(height: 2.h),
-                      Text(
-                        product.name!,
-                        style: CustomTextStyles.openSansRegular.copyWith(
-                          fontSize: 12.fSize,
-                          color: AppColours.hintcolor,
-                        ),
-                      ),
-                    ],
                     if (garmentLabel != null) ...[
                       SizedBox(height: 4.h),
                       Text(
@@ -1023,7 +1232,7 @@
                   ],
                 ),
               ),
-              if (product.canExpand)
+              if (product.canExpand && items.length > 1)
                 GestureDetector(
                   onTap: () {
                     setState(() {
@@ -1048,7 +1257,7 @@
                     ),
                   ),
                 ),
-              if (_enableWorkflow && _journey.requiresConfirmation) ...[
+              if (_enableWorkflow && _needsPhotoProof) ...[
                 SizedBox(width: 8.w),
                 GestureDetector(
                   onTap: () {
@@ -1080,7 +1289,9 @@
               ],
             ],
           ),
-          if (product.canExpand)
+          // Nested garment cards only when there are multiple selectedItems
+          // (avoid a duplicate inner container for a single product).
+          if (product.canExpand && items.length > 1)
             AnimatedCrossFade(
               firstChild: const SizedBox(width: double.infinity),
               secondChild: _buildExpandedGarmentList(items),
@@ -1151,6 +1362,17 @@
                       style: CustomTextStyles.openSansRegular.copyWith(
                         fontSize: 11.fSize,
                         color: AppColours.hintcolor,
+                      ),
+                    ),
+                  ],
+                  if (garment.qrCode != null &&
+                      garment.qrCode!.trim().isNotEmpty) ...[
+                    SizedBox(height: 2.h),
+                    Text(
+                      'QR: ${garment.qrCode}',
+                      style: CustomTextStyles.openSansRegular.copyWith(
+                        fontSize: 10.fSize,
+                        color: AppColours.primary.withValues(alpha: 0.85),
                       ),
                     ),
                   ],
@@ -1369,8 +1591,15 @@
       );
     }
     Widget _buildInstructions() {
-      final note = _order?.returnNotes?.trim() ?? _order?.notes?.trim();
-      final instructions = _order?.instructions?.trim();
+      final isRto = _order?.isUndeliveredReturnToHub == true;
+      final rtoNote = isRto ? _order?.rtoDisplayNotes : null;
+      final note = isRto
+          ? rtoNote
+          : (_isReturnOrder
+              ? _order?.returnNotes?.trim()
+              : (_order?.returnNotes?.trim() ?? _order?.notes?.trim()));
+      final instructions =
+          (_isReturnOrder || isRto) ? null : _order?.instructions?.trim();
       final hasNote = note != null && note.isNotEmpty;
       final hasInstructions = instructions != null &&
           instructions.isNotEmpty &&
@@ -1388,7 +1617,7 @@
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              _instructionsTitle,
+              isRto ? 'Return Notes & Instructions' : _instructionsTitle,
               style: CustomTextStyles.openSansSemiBold.copyWith(
                 fontSize: 12.fSize,
                 color: AppColours.primary,
@@ -1396,9 +1625,9 @@
             ),
             if (hasNote) ...[
               SizedBox(height: 12.h),
-              if (_isReturnOrder)
+              if (_isReturnOrder || isRto)
                 Text(
-                  'Customer Return Notes:',
+                  isRto ? 'RTO Notes:' : 'Customer Return Notes:',
                   style: CustomTextStyles.openSansSemiBold.copyWith(
                     fontSize: 11.fSize,
                     color: AppColours.hintcolor,
@@ -1435,7 +1664,7 @@
             if (!hasNote && !hasInstructions) ...[
               SizedBox(height: 12.h),
               Text(
-                _isReturnOrder
+                (_isReturnOrder || isRto)
                     ? 'No return notes provided'
                     : 'No instructions provided',
                 style: CustomTextStyles.openSansRegular.copyWith(
@@ -1588,6 +1817,11 @@
       }
     }
 
+    Widget _buildPartnerEarningSection(DpOrder order) {
+      // Return to IAP (RTO): Total Fare = base_amount; other flows unchanged.
+      return _buildTotalFare(order.displayPartnerEarning ?? '0');
+    }
+
     Widget _buildTotalFare(String fare) {
       return Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1638,6 +1872,148 @@
       );
     }
 
+    Widget _buildNavigateToIapButton() {
+      return SizedBox(
+        width: double.infinity,
+        height: 44.h,
+        child: OutlinedButton.icon(
+          icon: const Icon(Icons.navigation_outlined, color: AppColours.primary),
+          label: Text(
+            'Navigate to IAP Store',
+            style: CustomTextStyles.montserratBold.copyWith(
+              color: AppColours.primary,
+              fontSize: 14.fSize,
+            ),
+          ),
+          style: OutlinedButton.styleFrom(
+            side: const BorderSide(color: AppColours.primary),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+          onPressed: () {
+            final coords = _locationCoordinates;
+            _openMaps(
+              latitude: coords.latitude,
+              longitude: coords.longitude,
+              address: _locationAddress,
+            );
+          },
+        ),
+      );
+    }
+
+    Widget _buildSectionLabel(String text) {
+      return Text(
+        text,
+        style: CustomTextStyles.montserratBold.copyWith(
+          fontSize: 14.fSize,
+          color: AppColours.primary,
+        ),
+      );
+    }
+
+    Widget _buildRtoNotesField() {
+      return DottedBorder(
+        color: const Color(0x99E6C27A),
+        strokeWidth: 1.2,
+        dashPattern: const [6, 4],
+        borderType: BorderType.RRect,
+        radius: const Radius.circular(12),
+        child: Padding(
+          padding: EdgeInsets.all(12.w),
+          child: TextField(
+            controller: _rtoNotesController,
+            enabled: !_isUpdating,
+            maxLines: 3,
+            textCapitalization: TextCapitalization.sentences,
+            style: const TextStyle(color: AppColours.secondary, fontSize: 13),
+            decoration: const InputDecoration(
+              hintText: 'Handed package to IAP hub counter',
+              hintStyle: TextStyle(color: Colors.white38, fontSize: 13),
+              border: InputBorder.none,
+              isDense: true,
+              contentPadding: EdgeInsets.zero,
+            ),
+          ),
+        ),
+      );
+    }
+
+    Widget _buildUndeliveredReturnBanner() {
+      final order = _order;
+      final reason = order?.rtoDisplayNotes;
+      final customer = order?.customerName?.trim();
+      final rtoStatus = order?.rtoStatus?.trim() ??
+          order?.rtoDetails?.status?.trim();
+      final hub = order?.rtoHubName;
+      final infoStyle = CustomTextStyles.openSansRegular.copyWith(
+        fontSize: 12.fSize,
+        color: Colors.white70,
+      );
+      return Container(
+        width: double.infinity,
+        padding: EdgeInsets.all(16.w),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFA726).withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: const Color(0xFFFFA726).withValues(alpha: 0.45),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(
+                  Icons.warning_amber_rounded,
+                  color: Color(0xFFFFA726),
+                  size: 20,
+                ),
+                SizedBox(width: 8.w),
+                Expanded(
+                  child: Text(
+                    'Delivery Failed — Return to IAP Store',
+                    style: CustomTextStyles.montserratBold.copyWith(
+                      fontSize: 13.fSize,
+                      color: const Color(0xFFFFA726),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (order != null) ...[
+              SizedBox(height: 6.h),
+              Text('Order ID: ${order.orderNumber}', style: infoStyle),
+            ],
+            if (customer != null && customer.isNotEmpty) ...[
+              SizedBox(height: 4.h),
+              Text('Customer: $customer', style: infoStyle),
+            ],
+            if (rtoStatus != null && rtoStatus.isNotEmpty) ...[
+              SizedBox(height: 4.h),
+              Text('RTO Status: $rtoStatus', style: infoStyle),
+            ],
+            if (hub != null && hub.isNotEmpty) ...[
+              SizedBox(height: 4.h),
+              Text('Return Hub: $hub', style: infoStyle),
+            ],
+            if (reason != null && reason.isNotEmpty) ...[
+              SizedBox(height: 4.h),
+              Text('Reason: $reason', style: infoStyle),
+            ],
+            SizedBox(height: 6.h),
+            Text(
+              'Please return the collected garments to the IAP Partner Store (Hub).',
+              style: CustomTextStyles.openSansRegular.copyWith(
+                fontSize: 12.fSize,
+                color: AppColours.secondary,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     Widget _buildSecondaryButton(String label, {VoidCallback? onPressed}) {
       return SizedBox(
         width: double.infinity,
@@ -1659,121 +2035,7 @@
       );
     }
 
-    Future<void> _showNotDeliveredDialog(BuildContext context) async {
-      final reasonController = TextEditingController();
-
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (dialogContext) => Dialog(
-          backgroundColor: Colors.black87,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          child: Container(
-            padding: EdgeInsets.all(24.w),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: AppColours.primary.withOpacity(0.1)),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Center(
-                  child: Text(
-                    'Mark as Not Delivered?',
-                    style: CustomTextStyles.montserratBold.copyWith(
-                      fontSize: 18.fSize,
-                      color: AppColours.primary,
-                    ),
-                  ),
-                ),
-                SizedBox(height: 24.h),
-                Text(
-                  'REASON *',
-                  style: CustomTextStyles.montserratBold.copyWith(
-                    fontSize: 12.fSize,
-                    color: AppColours.primary,
-                  ),
-                ),
-                SizedBox(height: 12.h),
-                DottedBorder(
-                  color: const Color(0x99E6C27A),
-                  strokeWidth: 1.2,
-                  dashPattern: const [6, 4],
-                  borderType: BorderType.RRect,
-                  radius: const Radius.circular(12),
-                  child: Container(
-                    height: 120.h,
-                    padding: EdgeInsets.all(16.w),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(12),
-                      color: Colors.transparent,
-                    ),
-                    child: TextField(
-                      controller: reasonController,
-                      maxLines: 5,
-                      style: const TextStyle(
-                        color: AppColours.secondary,
-                        fontSize: 13,
-                      ),
-                      decoration: const InputDecoration(
-                        hintText: 'Customer not responding to the calls',
-                        hintStyle: TextStyle(color: Colors.white38, fontSize: 13),
-                        border: InputBorder.none,
-                        isDense: true,
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    ),
-                  ),
-                ),
-                SizedBox(height: 32.h),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _buildSecondaryButton(
-                        'Back',
-                        onPressed: () => Navigator.pop(dialogContext, false),
-                      ),
-                    ),
-                    SizedBox(width: 12.w),
-                    Expanded(
-                      child: _buildPrimaryButton(
-                        'Yes, Confirm',
-                        onPressed: () {
-                          final reason = reasonController.text.trim();
-                          if (reason.isEmpty) {
-                            CustomSnackBar.showWarning(context, 'Please enter a rejection reason.');
-                            return;
-                          }
-                          Navigator.pop(dialogContext, true);
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-
-      if (confirmed == true && mounted) {
-        await _updateStatus(
-          status: 'not_delivered',
-          rejectReason: reasonController.text.trim(),
-        );
-        if (mounted) {
-          Navigator.pushNamedAndRemoveUntil(
-            context,
-            AppRoutes.mainContainer,
-            (route) => false,
-          );
-        }
-      }
-
-      reasonController.dispose();
-    }
-
-    Future<String?> _pickFailedPhoto(BuildContext sheetContext) async {
+    Future<String?> _pickFailedPhoto(BuildContext sheetContext, {String title = 'Upload Failed Proof Photo'}) async {
       final source = await showModalBottomSheet<ImageSource>(
         context: sheetContext,
         backgroundColor: const Color(0xFF1A1A1F),
@@ -1795,7 +2057,7 @@
               ),
               SizedBox(height: 24.h),
               Text(
-                'Upload Failed Proof Photo',
+                title,
                 style: CustomTextStyles.montserratBold.copyWith(
                   fontSize: 16.fSize,
                   color: Colors.white,
@@ -1838,8 +2100,107 @@
       return image?.path;
     }
 
+    Future<void> _showNotDeliveredDialog(BuildContext context) async {
+      var reason = '';
+
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => Dialog(
+          backgroundColor: Colors.black87,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          child: Container(
+            padding: EdgeInsets.all(24.w),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: AppColours.primary.withValues(alpha: 0.1)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Text(
+                    'Mark as Not Delivered?',
+                    style: CustomTextStyles.montserratBold.copyWith(
+                      fontSize: 18.fSize,
+                      color: AppColours.primary,
+                    ),
+                  ),
+                ),
+                SizedBox(height: 24.h),
+                Text(
+                  'REASON *',
+                  style: CustomTextStyles.montserratBold.copyWith(
+                    fontSize: 12.fSize,
+                    color: AppColours.primary,
+                  ),
+                ),
+                SizedBox(height: 12.h),
+                DottedBorder(
+                  color: const Color(0x99E6C27A),
+                  strokeWidth: 1.2,
+                  dashPattern: const [6, 4],
+                  borderType: BorderType.RRect,
+                  radius: const Radius.circular(12),
+                  child: Container(
+                    height: 120.h,
+                    padding: EdgeInsets.all(16.w),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      color: Colors.transparent,
+                    ),
+                    child: _DialogReasonField(
+                      hintText: 'Customer not responding to the calls',
+                      onChanged: (value) => reason = value,
+                    ),
+                  ),
+                ),
+                SizedBox(height: 32.h),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildSecondaryButton(
+                        'Back',
+                        onPressed: () => Navigator.pop(dialogContext, false),
+                      ),
+                    ),
+                    SizedBox(width: 12.w),
+                    Expanded(
+                      child: _buildPrimaryButton(
+                        'Yes, Confirm',
+                        onPressed: () {
+                          if (reason.trim().isEmpty) {
+                            CustomSnackBar.showWarning(context, 'Please enter a rejection reason.');
+                            return;
+                          }
+                          Navigator.pop(dialogContext, true);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      if (confirmed == true && mounted) {
+        await _updateStatus(
+          status: 'not_delivered',
+          rejectReason: reason.trim(),
+        );
+        if (mounted) {
+          CustomSnackBar.showWarning(
+            context,
+            'Order marked as Not Delivered. Please return the garments to the IAP Partner Store.',
+          );
+        }
+      }
+    }
+
     Future<void> _showReturnFailedDialog(BuildContext context) async {
-      final reasonController = TextEditingController();
+      var reason = '';
       String? failedPhotoPath;
       bool waited10mins = false;
 
@@ -2028,23 +2389,10 @@
                           borderRadius: BorderRadius.circular(12),
                           color: Colors.transparent,
                         ),
-                        child: TextField(
-                          controller: reasonController,
+                        child: _DialogReasonField(
+                          hintText: 'Customer door locked / unreachable',
                           maxLines: 4,
-                          style: const TextStyle(
-                            color: AppColours.secondary,
-                            fontSize: 13,
-                          ),
-                          decoration: const InputDecoration(
-                            hintText: 'Customer door locked / unreachable',
-                            hintStyle: TextStyle(
-                              color: Colors.white38,
-                              fontSize: 13,
-                            ),
-                            border: InputBorder.none,
-                            isDense: true,
-                            contentPadding: EdgeInsets.zero,
-                          ),
+                          onChanged: (value) => reason = value,
                         ),
                       ),
                     ),
@@ -2072,13 +2420,12 @@
                                 CustomSnackBar.showWarning(context, 'Please confirm you have waited at least 10 minutes.');
                                 return;
                               }
-                              final reason = reasonController.text.trim();
-                              if (reason.isEmpty) {
+                              if (reason.trim().isEmpty) {
                                 CustomSnackBar.showWarning(context, 'Please enter a failure reason.');
                                 return;
                               }
                               Navigator.pop(dialogContext, {
-                                'reason': reason,
+                                'reason': reason.trim(),
                                 'waited10mins': waited10mins,
                                 'photoPath': failedPhotoPath,
                               });
@@ -2111,8 +2458,6 @@
           );
         }
       }
-
-      reasonController.dispose();
     }
 
     Future<bool?> _showConfirmReturnDialog(
@@ -2282,3 +2627,48 @@
       );
     }
   }
+
+class _DialogReasonField extends StatefulWidget {
+  const _DialogReasonField({
+    required this.hintText,
+    required this.onChanged,
+    this.maxLines = 5,
+  });
+
+  final String hintText;
+  final ValueChanged<String> onChanged;
+  final int maxLines;
+
+  @override
+  State<_DialogReasonField> createState() => _DialogReasonFieldState();
+}
+
+class _DialogReasonFieldState extends State<_DialogReasonField> {
+  late final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: _controller,
+      maxLines: widget.maxLines,
+      onChanged: widget.onChanged,
+      style: const TextStyle(
+        color: AppColours.secondary,
+        fontSize: 13,
+      ),
+      decoration: InputDecoration(
+        hintText: widget.hintText,
+        hintStyle: const TextStyle(color: Colors.white38, fontSize: 13),
+        border: InputBorder.none,
+        isDense: true,
+        contentPadding: EdgeInsets.zero,
+      ),
+    );
+  }
+}

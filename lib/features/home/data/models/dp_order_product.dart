@@ -2,11 +2,14 @@ import 'dart:convert';
 
 import 'package:nomoride/features/home/data/models/order_item_section.dart';
 
-class DpOrderGarment {  const DpOrderGarment({
+class DpOrderGarment {
+  const DpOrderGarment({
     this.name,
     this.size,
     this.quantity,
     this.imageUrl,
+    this.qrCode,
+    this.price,
     this.isNonReturnable = false,
   });
 
@@ -14,6 +17,8 @@ class DpOrderGarment {  const DpOrderGarment({
   final String? size;
   final int? quantity;
   final String? imageUrl;
+  final String? qrCode;
+  final String? price;
   final bool isNonReturnable;
 
   String get displayName {
@@ -25,8 +30,14 @@ class DpOrderGarment {  const DpOrderGarment({
   String? get detailLabel {
     final parts = <String>[];
     final sizeText = size?.trim();
-    if (sizeText != null && sizeText.isNotEmpty) parts.add(sizeText);
+    if (sizeText != null && sizeText.isNotEmpty) {
+      parts.add('Size: ${sizeText.toUpperCase()}');
+    }
     if (quantity != null && quantity! > 0) parts.add('Qty: $quantity');
+    final priceText = price?.trim();
+    if (priceText != null && priceText.isNotEmpty) {
+      parts.add(priceText.startsWith('₹') ? priceText : '₹$priceText');
+    }
     if (parts.isEmpty) return null;
     return parts.join(' · ');
   }
@@ -34,7 +45,8 @@ class DpOrderGarment {  const DpOrderGarment({
   String get _mergeKey {
     final nameKey = displayName.toLowerCase().trim();
     final sizeKey = (size ?? '').trim().toLowerCase();
-    return '$nameKey|$sizeKey';
+    final qrKey = (qrCode ?? '').trim().toLowerCase();
+    return '$nameKey|$sizeKey|$qrKey';
   }
 
   DpOrderGarment copyWith({
@@ -42,6 +54,8 @@ class DpOrderGarment {  const DpOrderGarment({
     String? size,
     int? quantity,
     String? imageUrl,
+    String? qrCode,
+    String? price,
     bool? isNonReturnable,
   }) {
     return DpOrderGarment(
@@ -49,11 +63,13 @@ class DpOrderGarment {  const DpOrderGarment({
       size: size ?? this.size,
       quantity: quantity ?? this.quantity,
       imageUrl: imageUrl ?? this.imageUrl,
+      qrCode: qrCode ?? this.qrCode,
+      price: price ?? this.price,
       isNonReturnable: isNonReturnable ?? this.isNonReturnable,
     );
   }
 
-  /// Groups identical garments (same name + size) and sums quantity.
+  /// Groups identical garments (same name + size + QR) and sums quantity.
   static List<DpOrderGarment> mergeDuplicates(List<DpOrderGarment> items) {
     if (items.isEmpty) return const [];
 
@@ -85,6 +101,12 @@ class DpOrderGarment {  const DpOrderGarment({
         imageUrl: existing.imageUrl?.trim().isNotEmpty == true
             ? existing.imageUrl
             : item.imageUrl,
+        qrCode: existing.qrCode?.trim().isNotEmpty == true
+            ? existing.qrCode
+            : item.qrCode,
+        price: existing.price?.trim().isNotEmpty == true
+            ? existing.price
+            : item.price,
       );
     }
 
@@ -103,10 +125,41 @@ class DpOrderGarment {  const DpOrderGarment({
 
   factory DpOrderGarment.fromJson(Map<String, dynamic> json) {
     return DpOrderGarment(
-      name: _readString(json['product_name']),
-      size: _readString(json['size']),
-      quantity: _readInt(json['quantity']),
-      imageUrl: _readString(json['primary_image_url']),
+      name: _readLabel(
+        json['product_name'] ??
+            json['productName'] ??
+            json['name'] ??
+            json['garment_name'] ??
+            json['garmentName'],
+      ),
+      size: _readLabel(json['size'] ?? json['variant_size'] ?? json['variantSize']),
+      quantity: _readInt(json['quantity'] ?? json['qty']),
+      imageUrl: _readUrl(
+        json['primary_image_url'] ??
+            json['primaryImageUrl'] ??
+            json['image_url'] ??
+            json['imageUrl'] ??
+            json['product_image'] ??
+            json['productImage'] ??
+            json['image'],
+      ),
+      qrCode: _readRaw(
+        json['qr_code'] ??
+            json['qrCode'] ??
+            (json['qr_codes'] is List && (json['qr_codes'] as List).isNotEmpty
+                ? (json['qr_codes'] as List).first
+                : null) ??
+            (json['qrCodes'] is List && (json['qrCodes'] as List).isNotEmpty
+                ? (json['qrCodes'] as List).first
+                : null),
+      ),
+      price: _readPrice(
+        json['price'] ??
+            json['unitPrice'] ??
+            json['unit_price'] ??
+            json['current_amount'] ??
+            json['currentAmount'],
+      ),
     );
   }
 
@@ -123,10 +176,35 @@ class DpOrderGarment {  const DpOrderGarment({
         .toList();
   }
 
-  static String? _readString(dynamic value) {
+  static String? _readRaw(dynamic value) {
     final text = value?.toString().trim();
     if (text == null || text.isEmpty || text == 'null') return null;
+    return text;
+  }
+
+  static String? _readLabel(dynamic value) {
+    final text = _readRaw(value);
+    if (text == null) return null;
     return text.replaceAll('_', ' ');
+  }
+
+  static String? _readUrl(dynamic value) {
+    return _readRaw(value);
+  }
+
+  static String? _readPrice(dynamic value) {
+    if (value == null) return null;
+    if (value is num) {
+      final n = value.toDouble();
+      if (n <= 0) return null;
+      return n % 1 == 0 ? n.toInt().toString() : n.toStringAsFixed(2);
+    }
+    final text = _readRaw(value);
+    if (text == null) return null;
+    final cleaned = text.replaceAll(RegExp(r'[^\d.]'), '');
+    final parsed = double.tryParse(cleaned);
+    if (parsed == null || parsed <= 0) return null;
+    return parsed % 1 == 0 ? parsed.toInt().toString() : parsed.toStringAsFixed(2);
   }
 
   static int? _readInt(dynamic value) {
@@ -171,11 +249,16 @@ class DpOrderProduct {
   bool get isKidsEssentialsSection =>
       sectionType == OrderItemSectionType.kidsEssentials;
 
-  /// Wardrobe kit header from `kitDetails.kit_type`; otherwise `productName`.
+  /// Wardrobe kit header from `kitDetails.kit_type` / `kit_name`.
   String? get displayTitle {
     final kitTypeLabel = kitType?.trim();
     if (kitTypeLabel != null && kitTypeLabel.isNotEmpty) {
       return kitTypeLabel;
+    }
+
+    // Prefer the selected garment name when there is no kit header.
+    if (garments.length == 1) {
+      return garments.first.displayName;
     }
 
     final productName = name?.trim();
@@ -191,7 +274,15 @@ class DpOrderProduct {
     if (garments.length == 1) {
       final g = garments.first;
       final parts = <String>[];
-      if (g.size != null && g.size!.isNotEmpty) parts.add('Size: ${g.size}');
+      final name = g.displayName;
+      if (kitType != null &&
+          kitType!.trim().isNotEmpty &&
+          name.toLowerCase() != kitType!.trim().toLowerCase()) {
+        parts.add(name);
+      }
+      if (g.size != null && g.size!.isNotEmpty) {
+        parts.add('Size: ${g.size!.toUpperCase()}');
+      }
       parts.add('Qty: ${g.quantity ?? quantity ?? 1}');
       return parts.join(' · ');
     }
@@ -206,15 +297,16 @@ class DpOrderProduct {
     return total > 0 ? total : null;
   }
 
-  /// Items shown in the expanded dropdown list (duplicates merged by qty).
+  /// Items shown from `kitDetails.selectedItems`.
   List<DpOrderGarment> get expandableItems {
     if (garments.isEmpty) return const [];
     return DpOrderGarment.mergeDuplicates(garments);
   }
 
-  bool get canExpand => expandableItems.length > 1;
+  /// Always let the partner open selectedItems when present.
+  bool get canExpand => expandableItems.isNotEmpty;
 
-  /// Images for the kit header thumbnail grid (garment images first, up to 4).
+  /// Images for the kit header thumbnail grid (selectedItems images first).
   List<String> get previewImageUrls {
     final urls = <String>[];
 
@@ -243,15 +335,18 @@ class DpOrderProduct {
     final sectionType = OrderItemClassifier.classify(json, kitDetails);
     var garments = _readGarments(kitDetails);
 
-    final imageUrl = _readString(
+    final imageUrl = _readUrl(
       json['imageUrl'] ??
           json['image'] ??
           json['primary_image_url'] ??
-          json['product_image'],
+          json['primaryImageUrl'] ??
+          json['product_image'] ??
+          json['productImage'] ??
+          json['image_url'],
     );
-    final size = _readString(json['size']);
+    final size = _readLabel(json['size']);
     final qty = _readInt(json['quantity']) ?? 1;
-    final productName = _readString(json['productName'] ?? json['product_name']);
+    final productName = _readLabel(json['productName'] ?? json['product_name']);
 
     if (garments.isEmpty && productName != null && productName.isNotEmpty) {
       garments = [
@@ -272,7 +367,12 @@ class DpOrderProduct {
 
     return DpOrderProduct(
       name: productName,
-      kitType: _readString(kitDetails?['kit_type']),
+      kitType: _readLabel(
+        kitDetails?['kit_type'] ??
+            kitDetails?['kitType'] ??
+            kitDetails?['kit_name'] ??
+            kitDetails?['kitName'],
+      ),
       quantity: qty,
       garments: garments,
       sectionType: sectionType,
@@ -298,7 +398,10 @@ class DpOrderProduct {
   static List<DpOrderGarment> _readGarments(Map<String, dynamic>? kitDetails) {
     if (kitDetails == null) return const [];
 
-    final selectedItemsRaw = kitDetails['selectedItems'];
+    final selectedItemsRaw = kitDetails['selectedItems'] ??
+        kitDetails['selected_items'] ??
+        kitDetails['garments'] ??
+        kitDetails['items'];
     if (selectedItemsRaw is! List || selectedItemsRaw.isEmpty) {
       return const [];
     }
@@ -317,7 +420,7 @@ class DpOrderProduct {
   }
 
   static Map<String, dynamic>? _parseKitDetailsMap(Map<String, dynamic> json) {
-    final raw = json['kitDetails'];
+    final raw = json['kitDetails'] ?? json['kit_details'] ?? json['kit'];
     if (raw is Map) {
       return raw.map((key, value) => MapEntry(key.toString(), value));
     }
@@ -332,10 +435,16 @@ class DpOrderProduct {
     return null;
   }
 
-  static String? _readString(dynamic value) {
+  static String? _readLabel(dynamic value) {
     final text = value?.toString().trim();
     if (text == null || text.isEmpty || text == 'null') return null;
     return text.replaceAll('_', ' ');
+  }
+
+  static String? _readUrl(dynamic value) {
+    final text = value?.toString().trim();
+    if (text == null || text.isEmpty || text == 'null') return null;
+    return text;
   }
 
   static int? _readInt(dynamic value) {

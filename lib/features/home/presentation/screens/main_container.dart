@@ -1,10 +1,12 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/core/services/fcm_service.dart';
 import 'package:nomoride/core/services/socket_service.dart';
-import 'package:nomoride/core/widgets/app_shimmer.dart';
 import 'package:nomoride/routes/app_routes.dart';
 import '../../../orders/presentation/screens/orders_screen.dart';
 import '../../../profile/presentation/screens/profile_screen.dart';
+import '../../../profile/data/profile_repository.dart';
 import 'home_screen.dart';
 import '../../../../theme/theme_helper.dart';
 import '../../../../core/utils/size_utils.dart';
@@ -30,6 +32,7 @@ class _MainContainerState extends State<MainContainer> {
 
   Future<void> _ensureAuthenticated() async {
     await AuthSession.restore();
+    await ProfileRepository.restoreOnlineStatus();
     if (!mounted) return;
     if (AuthSession.hasValidSession) {
       SocketService.instance.initAndConnect();
@@ -56,41 +59,47 @@ class _MainContainerState extends State<MainContainer> {
           _loadedTabs.contains(2) ? const ProfileScreen() : const SizedBox.shrink(),
         ],
       ),
-      bottomNavigationBar: ValueListenableBuilder<bool>(
-        valueListenable: HomeScreen.isHomeLoadingNotifier,
-        builder: (context, isHomeLoading, _) {
-          if (isHomeLoading && _selectedIndex == 0) {
-            return const HomeBottomBarShimmer();
-          }
-          return Container(
-            margin: EdgeInsets.all(24.w),
-            height: 70.h,
-            decoration: BoxDecoration(
-              color: Colors.black87,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: AppColours.primary.withValues(alpha: 0.2),
-                width: 1,
-              ),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _buildNavItem(0, Icons.home_rounded, 'Home'),
-                _buildNavItem(1, Icons.assignment_outlined, 'My Orders'),
-                _buildNavItem(2, Icons.person_outline_rounded, 'Profile'),
-              ],
-            ),
-          );
-        },
+      bottomNavigationBar: Container(
+        margin: EdgeInsets.all(24.w),
+        height: 70.h,
+        decoration: BoxDecoration(
+          color: Colors.black87,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: AppColours.primary.withValues(alpha: 0.2),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          children: [
+            _buildNavItem(0, Icons.home_rounded, 'Home'),
+            _buildNavItem(1, Icons.assignment_outlined, 'My Orders'),
+            _buildNavItem(2, Icons.person_outline_rounded, 'Profile'),
+          ],
+        ),
       ),
     );
+  }
+
+  void _printTokenOnHomeTap() {
+    final fcm = FcmService.currentToken?.trim();
+    final auth = AuthSession.authToken?.trim();
+    debugPrint('==================== HOME TAP TOKENS ====================');
+    debugPrint('FCM Token: ${fcm?.isNotEmpty == true ? fcm : '(null)'}');
+    debugPrint(
+      'Auth Token: ${auth?.isNotEmpty == true ? auth : '(null)'}',
+    );
+    debugPrint('=========================================================');
   }
 
   Widget _buildNavItem(int index, IconData icon, String label) {
     bool isSelected = _selectedIndex == index;
     return GestureDetector(
       onTap: () {
+        if (index == 0) {
+          _printTokenOnHomeTap();
+        }
         if (_selectedIndex != index) {
           setState(() {
             _selectedIndex = index;

@@ -37,14 +37,16 @@ class _OrdersScreenState extends State<OrdersScreen>
     super.dispose();
   }
 
-  Future<void> _loadOrders() async {
+  Future<void> _loadOrders({bool? showLoader}) async {
+    // Pull-to-refresh already shows RefreshIndicator — avoid a second overlay spinner.
+    final useOverlayLoader = showLoader ?? _ordersData == null;
     setState(() {
-      _isLoading = true;
+      if (useOverlayLoader) _isLoading = true;
       _errorMessage = null;
     });
 
     try {
-      final data = await _repository.getMyOrders();
+      final data = await _repository.getMyOrders(failedOrders: true);
       if (!mounted) return;
       setState(() => _ordersData = data);
     } catch (error) {
@@ -54,7 +56,7 @@ class _OrdersScreenState extends State<OrdersScreen>
             error is ApiException ? error.message : error.toString();
       });
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted && useOverlayLoader) setState(() => _isLoading = false);
     }
   }
 
@@ -63,30 +65,81 @@ class _OrdersScreenState extends State<OrdersScreen>
     if (data == null) return const [];
 
     final all = data.allOrders;
+    final List<DpOrder> filtered;
     switch (type) {
       case 'Completed':
-        return all.where(_isCompletedOrder).toList();
+        filtered = all.where(_isCompletedOrder).toList();
+        break;
       case 'In Transit':
-        return all
+        filtered = all
             .where((order) =>
                 !_isCompletedOrder(order) && !order.isNotDelivered)
             .toList();
+        break;
       case 'Not Delivered':
-        return all
-            .where((order) => order.isNotDelivered && !order.isReturnFlow)
+        // Delivery failures / RTO-done. Order Delivery stays here even when
+        // the parent status is RETURN_FAILED.
+        filtered = all
+            .where((order) => order.isNotDelivered && !_isPickupFailedOrder(order))
             .toList();
+        break;
       case 'Pickup Failed':
-        return all
-            .where((order) => order.isNotDelivered && order.isReturnFlow)
-            .toList();
+        // Only cards labeled Order Return. Order Delivery never belongs here.
+        filtered = all.where(_isPickupFailedOrder).toList();
+        break;
       default:
-        return all;
+        filtered = List<DpOrder>.from(all);
     }
+    return _sortLatestFirst(filtered);
+  }
+
+  /// Newest activity / assignment first across every My Orders tab.
+  List<DpOrder> _sortLatestFirst(List<DpOrder> orders) {
+    orders.sort((a, b) {
+      final aTime = _orderSortTime(a);
+      final bTime = _orderSortTime(b);
+      if (aTime == null && bTime == null) return 0;
+      if (aTime == null) return 1;
+      if (bTime == null) return -1;
+      return bTime.compareTo(aTime);
+    });
+    return orders;
+  }
+
+  DateTime? _orderSortTime(DpOrder order) {
+    DateTime? latest;
+    for (final raw in [
+      order.completedAt,
+      order.rtoCompletedAt,
+      order.returnedToIapAt,
+      order.deliveredAt,
+      order.arrivedAtDeliveryAt,
+      order.inTransitAt,
+      order.pickupConfirmedAt,
+      order.arrivedAtIapAt,
+      order.scheduledTime,
+    ]) {
+      final value = raw?.trim();
+      if (value == null || value.isEmpty) continue;
+      final parsed = DateTime.tryParse(value);
+      if (parsed == null) continue;
+      if (latest == null || parsed.isAfter(latest)) {
+        latest = parsed;
+      }
+    }
+    return latest;
   }
 
   bool _isNotDeliveredOrder(DpOrder order) => order.isNotDelivered;
 
+  /// Pickup Failed tab is Order Return only (`flow_type: return`).
+  bool _isPickupFailedOrder(DpOrder order) =>
+      order.isReturnFailed && order.displayTitle == 'Order Return';
+
   bool _isCompletedOrder(DpOrder order) {
+    // RTO-finished failed deliveries use status `returned_to_iap` but belong
+    // under Not Delivered, not Completed.
+    if (order.isNotDelivered) return false;
     final status = order.status.toLowerCase().trim();
     return status == 'completed' ||
         status == 'delivered' ||
@@ -94,9 +147,8 @@ class _OrdersScreenState extends State<OrdersScreen>
   }
 
   String _myOrdersStatusLabel(DpOrder order) {
-    if (order.isNotDelivered) {
-      return order.isReturnFlow ? 'Pickup Failed' : 'Not Delivered';
-    }
+    if (_isPickupFailedOrder(order)) return 'Pickup Failed';
+    if (order.isNotDelivered) return 'Not Delivered';
     return _isCompletedOrder(order) ? 'Completed' : 'In Transit';
   }
 
@@ -228,7 +280,7 @@ class _OrdersScreenState extends State<OrdersScreen>
     return RefreshIndicator(
       color: AppColours.primary,
       backgroundColor: AppColours.black,
-      onRefresh: _loadOrders,
+      onRefresh: () => _loadOrders(showLoader: false),
       child: ListView.separated(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.all(24.w),
@@ -257,7 +309,7 @@ class _OrdersScreenState extends State<OrdersScreen>
           arguments: {
             'order': order,
             'isInTransit': isInTransit,
-            'enableWorkflow': false,
+            'enableWorkflow': order.isUndeliveredReturnToHub,
           },
         );
         if (updated is DpOrder) {
@@ -311,11 +363,11 @@ class _OrdersScreenState extends State<OrdersScreen>
                 fontSize: 13.fSize,
               ),
             ),
-            if (order.amount != null &&
+            if (order.displayPartnerEarning != null &&
                 ProfileRepository.showsPartnerEarning) ...[
               SizedBox(height: 8.h),
               Text(
-                'Earning: ₹${order.amount}',
+                'Earning: ₹${order.displayPartnerEarning}',
                 style: CustomTextStyles.openSansRegular.copyWith(
                   fontSize: 12.fSize,
                   color: AppColours.hintcolor,

@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:nomoride/features/home/data/models/dp_order.dart';
 
 /// A single transition in the delivery/return workflow.
@@ -94,14 +95,44 @@ class OrderFlow {
     ),
   ];
 
+  static const undeliveredReturnTransitions = [
+    FlowTransition(
+      apiStatus: 'start',
+      statusOccurrence: 1,
+      phase: OrderPhase.returnToIap,
+    ),
+    FlowTransition(
+      apiStatus: 'arrived',
+      statusOccurrence: 1,
+      phase: OrderPhase.returnToIap,
+    ),
+    FlowTransition(
+      apiStatus: 'confirm_delivery',
+      statusOccurrence: 0,
+      phase: OrderPhase.returnToIap,
+    ),
+    FlowTransition(
+      apiStatus: 'delivery_success',
+      statusOccurrence: 0,
+      phase: OrderPhase.returnToIap,
+    ),
+  ];
+
   bool get isReturn => order.isReturnFlow;
 
-  List<FlowTransition> get transitions =>
-      isReturn ? returnTransitions : deliveryTransitions;
+  List<FlowTransition> get transitions {
+    if (order.isUndeliveredReturnToHub) {
+      return undeliveredReturnTransitions;
+    }
+    return isReturn ? returnTransitions : deliveryTransitions;
+  }
 
   String get apiStatusKey => order.apiStatusKey;
 
-  bool get isRejected => order.isNotDelivered || order.isRejectedStatus;
+  bool get isRejected {
+    if (order.isUndeliveredReturnToHub) return false;
+    return order.isNotDelivered || order.isRejectedStatus;
+  }
 
   static const _inProgressStatuses = {
     'assigned',
@@ -125,7 +156,12 @@ class OrderFlow {
   };
 
   bool get isCompleted {
-    if (isReturn) {
+    // RTO hub return finished (incl. status still `not_delivered` + RTO_COMPLETED).
+    if (order.isReturnedToIap || order.isRtoCompleted) {
+      return true;
+    }
+
+    if (isReturn || order.isUndeliveredReturnToHub) {
       return apiStatusKey == 'completed' ||
           apiStatusKey == 'returned_to_iap';
     }
@@ -148,8 +184,42 @@ class OrderFlow {
   /// No extra auto-finalize step is required for return flow.
   bool get needsReturnedToIapFollowUp => false;
 
-  int get completedTransitionIndex =>
-      isReturn ? _returnCompletedIndex : _deliveryCompletedIndex;
+  int get completedTransitionIndex {
+    if (order.isUndeliveredReturnToHub) {
+      return _undeliveredReturnCompletedIndex;
+    }
+    return isReturn ? _returnCompletedIndex : _deliveryCompletedIndex;
+  }
+
+  int get _undeliveredReturnCompletedIndex {
+    if (order.isReturnedToIap || apiStatusKey == 'completed') {
+      return undeliveredReturnTransitions.length - 1;
+    }
+
+    final status = apiStatusKey;
+    switch (status) {
+      case 'not_delivered':
+      case 'failed':
+      case 'delivery_failed':
+        return -1;
+      case 'in_transit_to_iap':
+      case 'in_transit':
+      case 'start':
+        return 0;
+      case 'arrived_at_iap':
+      case 'arrived':
+        return 1;
+      case 'confirm_delivery':
+      case 'delivered':
+        return 2;
+      case 'delivery_success':
+      case 'returned_to_iap':
+      case 'completed':
+        return undeliveredReturnTransitions.length - 1;
+    }
+
+    return -1;
+  }
 
   bool _hasTs(String? value) => value != null && value.trim().isNotEmpty;
 
@@ -227,9 +297,14 @@ class OrderFlow {
         return -1;
       case 'accepted':
       case 'in_progress':
+      case 'in_transit_to_customer':
+        return 0;
       case 'in_transit_to_iap':
         return 0;
+      case 'arrived_at_customer':
+        return 1;
       case 'arrived_at_iap':
+        if (_hasTs(order.pickupConfirmedAt)) return 4;
         return 1;
       case 'confirm_pickup':
       case 'pickup_confirmed':
@@ -245,7 +320,6 @@ class OrderFlow {
       case 'delivery_success':
         return 6;
       case 'completed':
-        return returnTransitions.length - 1;
       case 'returned_to_iap':
         return returnTransitions.length - 1;
     }
@@ -287,6 +361,11 @@ class OrderFlow {
     final next = nextTransition;
     if (next == null) return '';
 
+    final serverNextLabel = order.apiNextActionLabel?.trim();
+    if (serverNextLabel != null && serverNextLabel.isNotEmpty) {
+      return serverNextLabel;
+    }
+
     final fromApi = order.labelForStep(
       apiStatus: next.apiStatus,
       occurrence: next.statusOccurrence,
@@ -308,35 +387,35 @@ class OrderFlow {
       case 'start':
         switch (transition.phase) {
           case OrderPhase.pickup:
-            return 'Head to IAP to collect kit';
+            return 'Start Trip to Hub';
           case OrderPhase.delivery:
-            return 'Arrived at customer location';
+            return 'Start Delivery to Customer';
           case OrderPhase.returnToCustomer:
-            return 'Head to customer for return pickup';
+            return 'Start Trip to Customer';
           case OrderPhase.returnToIap:
-            return 'Head to IAP to drop off return';
+            return 'Head to Hub for Drop-off';
         }
       case 'arrived':
         switch (transition.phase) {
           case OrderPhase.pickup:
-            return 'Confirm kit pickup from IAP';
+            return 'Arrived at Hub';
           case OrderPhase.delivery:
-            return 'Confirm delivery to customer';
+            return 'Arrived at Customer';
           case OrderPhase.returnToCustomer:
-            return 'Confirm kit pickup from customer';
+            return 'Arrived at Customer';
           case OrderPhase.returnToIap:
-            return 'Confirm drop-off at IAP';
+            return 'Arrived at Hub';
         }
       case 'confirm_pickup':
         return transition.phase == OrderPhase.returnToCustomer
-            ? 'Head to IAP to drop off return'
-            : 'Head to customer for delivery';
+            ? 'Collect Return Items (Photo)'
+            : 'Collect & Verify Kit (Photo)';
       case 'confirm_delivery':
         return transition.phase == OrderPhase.returnToIap
-            ? 'Mark return as complete'
-            : 'Mark delivery as complete';
+            ? 'Handover Items to IAP Hub'
+            : 'Confirm Handover (Photo)';
       case 'delivery_success':
-        return isReturn ? 'Return completed' : 'Delivery completed';
+        return isReturn ? 'Complete Return' : 'Finish Order';
       default:
         return _formatStatus(transition.apiStatus);
     }
@@ -396,6 +475,9 @@ class OrderFlow {
   bool get hasStarted => completedTransitionIndex >= 0;
 
   OrderPhase get currentPhase {
+    if (order.isUndeliveredReturnToHub) {
+      return OrderPhase.returnToIap;
+    }
     final next = nextTransition;
     if (next != null) return next.phase;
     final index = completedTransitionIndex;
@@ -405,19 +487,297 @@ class OrderFlow {
     return isReturn ? OrderPhase.returnToCustomer : OrderPhase.pickup;
   }
 
-  String get statusSummary {
-    if (isRejected) {
-      return isReturn
-          ? 'Return Failed'
-          : (order.isNotDelivered ? 'Not Delivered' : 'Rejected');
+  /// In return flow: whether the rider has reached the customer's pickup location.
+  bool get hasArrivedAtCustomerLocation {
+    if (!isReturn) return false;
+    // Step index >= 1 means arrival at customer location is completed.
+    if (completedTransitionIndex >= 1) return true;
+    if (_hasTs(order.pickupConfirmedAt) ||
+        _hasTs(order.arrivedAtDeliveryAt) ||
+        _hasTs(order.deliveredAt) ||
+        _hasTs(order.completedAt)) {
+      return true;
     }
-    if (isCompleted) {
-      return isReturn ? 'Return Success' : 'Delivery Success';
+    final status = apiStatusKey;
+    switch (status) {
+      case 'arrived':
+      case 'arrived_at_customer':
+      case 'arrived_at_iap':
+      case 'confirm_pickup':
+      case 'pickup_confirmed':
+      case 'picked_up':
+      case 'in_transit_to_delivery':
+      case 'arrived_at_delivery':
+      case 'confirm_delivery':
+      case 'delivered':
+      case 'delivery_success':
+      case 'returned_to_iap':
+      case 'completed':
+        return true;
+      default:
+        return false;
     }
-    final index = completedTransitionIndex;
-    if (index >= 0) return completedLabelForIndex(index);
-    return isReturn ? 'Return Assigned' : 'Assigned';
   }
+
+  String get statusBadgeLabel => statusBadgeInfo.label;
+
+  ({String label, Color color, Color backgroundColor, IconData icon}) get statusBadgeInfo {
+    if (order.isUndeliveredReturnToHub) {
+      if (isCompleted) {
+        return (
+          label: 'Returned to IAP Store',
+          color: const Color(0xFF4CAF50),
+          backgroundColor: const Color(0xFF4CAF50).withValues(alpha: 0.15),
+          icon: Icons.check_circle_outline,
+        );
+      }
+      final idx = completedTransitionIndex;
+      if (idx < 0) {
+        return (
+          label: 'Return to IAP Store',
+          color: const Color(0xFFFFA726),
+          backgroundColor: const Color(0xFFFFA726).withValues(alpha: 0.15),
+          icon: Icons.storefront_outlined,
+        );
+      }
+      if (idx == 0) {
+        return (
+          label: 'En Route to Hub',
+          color: const Color(0xFF42A5F5),
+          backgroundColor: const Color(0xFF42A5F5).withValues(alpha: 0.15),
+          icon: Icons.directions_bike_outlined,
+        );
+      }
+      if (idx == 1) {
+        return (
+          label: 'At IAP Store',
+          color: const Color(0xFFAB47BC),
+          backgroundColor: const Color(0xFFAB47BC).withValues(alpha: 0.15),
+          icon: Icons.storefront_outlined,
+        );
+      }
+      return (
+        label: 'Handover at Hub',
+        color: const Color(0xFF66BB6A),
+        backgroundColor: const Color(0xFF66BB6A).withValues(alpha: 0.15),
+        icon: Icons.task_alt_outlined,
+      );
+    }
+
+    if (isReturn) {
+      if (isRejected) {
+        return (
+          label: 'Return Failed',
+          color: Colors.redAccent,
+          backgroundColor: Colors.red.withValues(alpha: 0.12),
+          icon: Icons.cancel_outlined,
+        );
+      }
+      if (isCompleted) {
+        return (
+          label: 'Return Completed',
+          color: const Color(0xFF4CAF50),
+          backgroundColor: const Color(0xFF4CAF50).withValues(alpha: 0.15),
+          icon: Icons.check_circle_outline,
+        );
+      }
+
+      final status = apiStatusKey;
+      if (status == 'assigned' ||
+          status == 'return_assigned' ||
+          completedTransitionIndex < 0) {
+        return (
+          label: 'Return Accepted',
+          color: const Color(0xFFE6C27A),
+          backgroundColor: const Color(0xFFE6C27A).withValues(alpha: 0.15),
+          icon: Icons.assignment_outlined,
+        );
+      }
+
+      // First leg is always the customer, even when the forward delivery
+      // left pickup/in-transit timestamps on the same order.
+      const customerLeg = {
+        'accepted',
+        'in_progress',
+        'start',
+        'in_transit',
+        'in_transit_to_customer',
+        'in_transit_to_iap',
+        'arrived',
+        'arrived_at_customer',
+      };
+      if (customerLeg.contains(status) ||
+          (status == 'arrived_at_iap' && !_hasTs(order.pickupConfirmedAt))) {
+        return (
+          label: 'En Route to Customer Location',
+          color: const Color(0xFF42A5F5),
+          backgroundColor: const Color(0xFF42A5F5).withValues(alpha: 0.15),
+          icon: Icons.directions_bike_outlined,
+        );
+      }
+
+      if (!hasArrivedAtCustomerLocation) {
+        return (
+          label: 'En Route to Customer Location',
+          color: const Color(0xFF42A5F5),
+          backgroundColor: const Color(0xFF42A5F5).withValues(alpha: 0.15),
+          icon: Icons.directions_bike_outlined,
+        );
+      }
+
+      // Arrived at hub for drop-off / handover
+      if (completedTransitionIndex >= 4 ||
+          status == 'arrived_at_delivery' ||
+          (status == 'arrived_at_iap' && _hasTs(order.pickupConfirmedAt))) {
+        if (completedTransitionIndex >= 5 ||
+            status == 'confirm_delivery' ||
+            status == 'delivered') {
+          return (
+            label: 'Handover at Hub',
+            color: const Color(0xFF66BB6A),
+            backgroundColor: const Color(0xFF66BB6A).withValues(alpha: 0.15),
+            icon: Icons.task_alt_outlined,
+          );
+        }
+        return (
+          label: 'At Hub for Return',
+          color: const Color(0xFFAB47BC),
+          backgroundColor: const Color(0xFFAB47BC).withValues(alpha: 0.15),
+          icon: Icons.storefront_outlined,
+        );
+      }
+
+      // Once arrived at customer location (and on the way to Hub) -> En Route to Hub
+      return (
+        label: 'En Route to Hub',
+        color: const Color(0xFF42A5F5),
+        backgroundColor: const Color(0xFF42A5F5).withValues(alpha: 0.15),
+        icon: Icons.directions_bike_outlined,
+      );
+    }
+
+    // Keep the delivery outcome visible even after RTO is completed.
+    if (order.isNotDelivered) {
+      return (
+        label: 'Not Delivered',
+        color: Colors.redAccent,
+        backgroundColor: Colors.red.withValues(alpha: 0.12),
+        icon: Icons.cancel_outlined,
+      );
+    }
+
+    if (isRejected) {
+      return (
+        label: 'Delivery Failed',
+        color: Colors.redAccent,
+        backgroundColor: Colors.red.withValues(alpha: 0.12),
+        icon: Icons.cancel_outlined,
+      );
+    }
+
+    if (isCompleted) {
+      return (
+        label: 'Completed',
+        color: const Color(0xFF4CAF50),
+        backgroundColor: const Color(0xFF4CAF50).withValues(alpha: 0.15),
+        icon: Icons.check_circle_outline,
+      );
+    }
+
+    final status = apiStatusKey;
+    switch (status) {
+      case 'assigned':
+      case 'accepted':
+        return (
+          label: 'Accepted',
+          color: const Color(0xFFE6C27A),
+          backgroundColor: const Color(0xFFE6C27A).withValues(alpha: 0.15),
+          icon: Icons.assignment_outlined,
+        );
+      case 'in_transit_to_iap':
+        return (
+          label: 'En Route to Hub',
+          color: const Color(0xFF42A5F5),
+          backgroundColor: const Color(0xFF42A5F5).withValues(alpha: 0.15),
+          icon: Icons.directions_bike_outlined,
+        );
+      case 'arrived_at_iap':
+        return (
+          label: 'At IAP Store',
+          color: const Color(0xFFAB47BC),
+          backgroundColor: const Color(0xFFAB47BC).withValues(alpha: 0.15),
+          icon: Icons.storefront_outlined,
+        );
+      case 'confirm_pickup':
+      case 'pickup_confirmed':
+      case 'picked_up':
+        return (
+          label: 'Kit Collected',
+          color: const Color(0xFFFFA726),
+          backgroundColor: const Color(0xFFFFA726).withValues(alpha: 0.15),
+          icon: Icons.inventory_2_outlined,
+        );
+      case 'in_transit_to_delivery':
+      case 'in_transit_to_customer':
+        return (
+          label: 'Out for Delivery',
+          color: const Color(0xFF29B6F6),
+          backgroundColor: const Color(0xFF29B6F6).withValues(alpha: 0.15),
+          icon: Icons.local_shipping_outlined,
+        );
+      case 'arrived_at_delivery':
+      case 'arrived_at_customer':
+        return (
+          label: 'At Customer Location',
+          color: const Color(0xFF7E57C2),
+          backgroundColor: const Color(0xFF7E57C2).withValues(alpha: 0.15),
+          icon: Icons.person_pin_circle_outlined,
+        );
+      case 'confirm_delivery':
+      case 'delivered':
+        return (
+          label: 'Handover Done',
+          color: const Color(0xFF66BB6A),
+          backgroundColor: const Color(0xFF66BB6A).withValues(alpha: 0.15),
+          icon: Icons.task_alt_outlined,
+        );
+      case 'delivery_success':
+      case 'completed':
+        return (
+          label: 'Completed',
+          color: const Color(0xFF4CAF50),
+          backgroundColor: const Color(0xFF4CAF50).withValues(alpha: 0.15),
+          icon: Icons.check_circle_outline,
+        );
+      case 'start':
+      case 'in_progress':
+        if (_hasTs(order.pickupConfirmedAt)) {
+          return (
+            label: 'Out for Delivery',
+            color: const Color(0xFF29B6F6),
+            backgroundColor: const Color(0xFF29B6F6).withValues(alpha: 0.15),
+            icon: Icons.local_shipping_outlined,
+          );
+        }
+        return (
+          label: 'En Route to Hub',
+          color: const Color(0xFF42A5F5),
+          backgroundColor: const Color(0xFF42A5F5).withValues(alpha: 0.15),
+          icon: Icons.directions_bike_outlined,
+        );
+      default:
+        final idx = completedTransitionIndex;
+        final label = idx >= 0 ? completedLabelForIndex(idx) : 'Trip Accepted';
+        return (
+          label: label,
+          color: const Color(0xFFE6C27A),
+          backgroundColor: const Color(0xFFE6C27A).withValues(alpha: 0.15),
+          icon: Icons.assignment_outlined,
+        );
+    }
+  }
+
+  String get statusSummary => statusBadgeLabel;
 
   bool get requiresPhotoConfirmation {
     final next = nextTransition?.apiStatus;

@@ -2,7 +2,7 @@ class ApiConfig {
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
     defaultValue: 'https://nomowear-backend.onrender.com',
-    // defaultValue: 'http://192.168.0.15:5000',
+    // defaultValue: 'https://appealing-clobber-hatchet.ngrok-free.dev',
 
   );
 
@@ -62,6 +62,9 @@ class ApiConfig {
 
   static Uri get updateProfileUri =>
       Uri.parse('$baseUrl$_mobileDeliveryPartners/updateProfile');
+
+  static Uri get updateIsOnlineUri =>
+      Uri.parse('$baseUrl$_mobileDeliveryPartners/update_isonline');
 
   static Uri get updateBankAccountDetailsUri =>
       Uri.parse('$baseUrl$_mobileDeliveryPartners/updateBankAccountDetails');

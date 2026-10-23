@@ -5,8 +5,12 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:nomoride/core/config/api_config.dart';
+import 'package:nomoride/core/network/session_guard.dart';
 import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/core/services/broadcast_notification_service.dart';
+import 'package:nomoride/core/services/socket_service.dart';
 import 'package:nomoride/features/notifications/data/notifications_repository.dart';
+import 'package:nomoride/features/orders/presentation/widgets/order_broadcast_bottom_sheet.dart';
 
 /// Top-level background message handler for FCM.
 /// Must be annotated with @pragma('vm:entry-point') to be called when the app is in the background or terminated.
@@ -17,6 +21,13 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   debugPrint('[FCMService] Background message title: ${message.notification?.title}');
   debugPrint('[FCMService] Background message body: ${message.notification?.body}');
   debugPrint('[FCMService] Background message data: ${message.data}');
+
+  // Messages with a `notification` block are already shown by the OS.
+  if (message.notification != null) return;
+  final broadcast = BroadcastNotificationService.fromFcmData(message.data);
+  if (broadcast != null) {
+    await BroadcastNotificationService.show(broadcast);
+  }
 }
 
 class FcmService {
@@ -100,11 +111,25 @@ class FcmService {
         debugPrint('[FCMService] Data: ${message.data}');
         NotificationsRepository.hasUnreadNotifier.value = true;
         NotificationsRepository.unreadCountNotifier.value += 1;
+        SocketService.instance.notifyOrderUpdate();
+
+        final broadcast = BroadcastNotificationService.fromFcmData(message.data);
+        if (broadcast != null) {
+          if (!BroadcastNotificationService.isAppInForeground) {
+            // Background: native overlay owns the alert + sound.
+            return;
+          }
+          final context = SessionGuard.navigatorKey.currentContext;
+          if (context != null) {
+            OrderBroadcastBottomSheet.show(context, broadcast);
+          }
+        }
       });
 
       // 7. Notification tap handling when app is opened from background
       FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
         debugPrint('[FCMService] Notification opened from background: ${message.messageId}');
+        SocketService.instance.notifyOrderUpdate();
         _handleMessageInteraction(message);
       });
 
@@ -112,6 +137,7 @@ class FcmService {
       final initialMessage = await messaging.getInitialMessage();
       if (initialMessage != null) {
         debugPrint('[FCMService] App launched from terminated state via notification: ${initialMessage.messageId}');
+        SocketService.instance.notifyOrderUpdate();
         _handleMessageInteraction(initialMessage);
       }
     } catch (e, stackTrace) {
@@ -177,5 +203,9 @@ class FcmService {
   /// Handles action or deep-link navigation on notification tap if needed without modifying existing UI
   static void _handleMessageInteraction(RemoteMessage message) {
     debugPrint('[FCMService] Processing message interaction: ${message.data}');
+    final broadcast = BroadcastNotificationService.fromFcmData(message.data);
+    if (broadcast != null) {
+      BroadcastNotificationService.present(broadcast);
+    }
   }
 }

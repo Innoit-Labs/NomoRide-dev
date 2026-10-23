@@ -19,6 +19,7 @@ class DeliveryPartnerProfile {
     this.bankIfsc,
     this.bankAccountName,
     this.inhouseDeliveryPartner = 0,
+    this.isOnline,
   });
 
   final String? id;
@@ -40,6 +41,9 @@ class DeliveryPartnerProfile {
 
   /// `0` = external (show partner earning), `1` = in-house (hide partner earning).
   final int inhouseDeliveryPartner;
+
+  /// Null when the profile payload does not include online status.
+  final bool? isOnline;
 
   bool get isInhouseDeliveryPartner => inhouseDeliveryPartner == 1;
 
@@ -185,7 +189,64 @@ class DeliveryPartnerProfile {
                 json['in_house_delivery_partner'],
           ) ??
           0,
+      isOnline: _readBool(json['is_online'] ?? json['isOnline']),
     );
+  }
+
+  DeliveryPartnerProfile copyWith({
+    String? id,
+    String? fullName,
+    String? mobileNumber,
+    String? gender,
+    String? dateOfBirth,
+    String? addressProofType,
+    String? currentAddress,
+    String? profilePhotoUrl,
+    String? addressProofImageUrl,
+    String? addressProofBackImageUrl,
+    String? drivingLicenseImageUrl,
+    String? drivingLicenseBackImageUrl,
+    String? upiId,
+    String? bankAccountNumber,
+    String? bankIfsc,
+    String? bankAccountName,
+    int? inhouseDeliveryPartner,
+    bool? isOnline,
+  }) {
+    return DeliveryPartnerProfile(
+      id: id ?? this.id,
+      fullName: fullName ?? this.fullName,
+      mobileNumber: mobileNumber ?? this.mobileNumber,
+      gender: gender ?? this.gender,
+      dateOfBirth: dateOfBirth ?? this.dateOfBirth,
+      addressProofType: addressProofType ?? this.addressProofType,
+      currentAddress: currentAddress ?? this.currentAddress,
+      profilePhotoUrl: profilePhotoUrl ?? this.profilePhotoUrl,
+      addressProofImageUrl: addressProofImageUrl ?? this.addressProofImageUrl,
+      addressProofBackImageUrl:
+          addressProofBackImageUrl ?? this.addressProofBackImageUrl,
+      drivingLicenseImageUrl:
+          drivingLicenseImageUrl ?? this.drivingLicenseImageUrl,
+      drivingLicenseBackImageUrl:
+          drivingLicenseBackImageUrl ?? this.drivingLicenseBackImageUrl,
+      upiId: upiId ?? this.upiId,
+      bankAccountNumber: bankAccountNumber ?? this.bankAccountNumber,
+      bankIfsc: bankIfsc ?? this.bankIfsc,
+      bankAccountName: bankAccountName ?? this.bankAccountName,
+      inhouseDeliveryPartner:
+          inhouseDeliveryPartner ?? this.inhouseDeliveryPartner,
+      isOnline: isOnline ?? this.isOnline,
+    );
+  }
+
+  static bool? _readBool(dynamic value) {
+    if (value == null) return null;
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    final text = value.toString().trim().toLowerCase();
+    if (text == 'true' || text == '1') return true;
+    if (text == 'false' || text == '0') return false;
+    return null;
   }
 
   static String? _readString(dynamic value) {

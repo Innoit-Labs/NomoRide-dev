@@ -11,9 +11,10 @@ import 'package:nomoride/features/registration/presentation/waitlist_navigation.
 import '../../../../core/widgets/app_logo.dart';
 import '../../../../routes/app_routes.dart';
 import '../../../../theme/theme_helper.dart';
+import '../../../profile/data/profile_repository.dart';
 
 class SplashScreen extends StatefulWidget {
-  const SplashScreen({Key? key}) : super(key: key);
+  const SplashScreen({super.key});
 
   @override
   State<SplashScreen> createState() => _SplashScreenState();
@@ -37,6 +38,7 @@ class _SplashScreenState extends State<SplashScreen> {
     // Ensure SharedPreferences values are loaded before any routing decision.
     await AuthSession.restore();
     await WaitlistSession.restore();
+    await ProfileRepository.restoreOnlineStatus();
 
     final referenceId = WaitlistSession.referenceId?.trim();
     final waitlistNumber = WaitlistSession.waitlistNumber;
