@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:nomoride/core/config/api_config.dart';
 import 'package:nomoride/core/network/api_exception.dart';
 import 'package:nomoride/core/network/session_guard.dart';
+import 'package:nomoride/core/services/auth_session.dart';
+import 'package:nomoride/core/services/broadcast_notification_service.dart';
+import 'package:nomoride/core/services/broadcast_sound_player.dart';
 import 'package:nomoride/core/services/socket_service.dart';
 import 'package:nomoride/core/utils/custom_snack_bar.dart';
 import 'package:nomoride/core/utils/size_utils.dart';
@@ -14,101 +18,397 @@ import 'package:nomoride/features/orders/data/models/order_broadcast_model.dart'
 import 'package:nomoride/routes/app_routes.dart';
 import 'package:nomoride/theme/theme_helper.dart';
 
-/// Controller that manages the active broadcast dialog and top notch widget.
+/// Represents an individual active broadcast card and its countdown timer state.
+class OrderBroadcastItem {
+  final OrderBroadcastModel broadcast;
+  final int totalSeconds;
+  final ValueNotifier<int> remainingSecondsNotifier;
+  Timer? countdownTimer;
+  bool isAccepting = false;
+  bool _disposed = false;
+
+  OrderBroadcastItem({
+    required this.broadcast,
+    required this.totalSeconds,
+    required this.remainingSecondsNotifier,
+  });
+
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    countdownTimer?.cancel();
+    countdownTimer = null;
+    remainingSecondsNotifier.dispose();
+  }
+}
+
+/// Controller that manages multi-broadcast state, carousel synchronization, and top notch overlays.
 class OrderBroadcastManager {
   OrderBroadcastManager._();
   static final OrderBroadcastManager instance = OrderBroadcastManager._();
 
-  final OrdersRepository _ordersRepository = OrdersRepository();
+  OrdersRepository? _repo;
+  OrdersRepository get _ordersRepository => _repo ??= OrdersRepository();
 
-  OrderBroadcastModel? _broadcast;
-  int _remainingSeconds = 30;
-  int _totalSeconds = 30;
-  Timer? _countdownTimer;
+  final Set<String> _acceptingOrderIds = {};
+  final List<OrderBroadcastItem> _items = [];
+  final ValueNotifier<List<OrderBroadcastItem>> itemsNotifier =
+      ValueNotifier<List<OrderBroadcastItem>>([]);
+
   Timer? _hapticTimer;
+  DateTime? _lastAlertTime;
   OverlayEntry? _notchOverlay;
   bool _isDialogOpen = false;
-  bool _isAccepting = false;
-  bool _isDeclined = false;
 
-  final ValueNotifier<int> remainingSecondsNotifier = ValueNotifier<int>(30);
+  int _currentPageIndex = 0;
+  int get currentPageIndex => _currentPageIndex;
+  set currentPageIndex(int index) => _currentPageIndex = index;
 
-  String? get currentActiveOrderId => _broadcast?.orderId;
+  List<OrderBroadcastModel> get activeBroadcasts =>
+      _items.map((e) => e.broadcast).toList();
 
-  /// Starts the broadcast flow: displays centered dialog and manages countdown.
+  String? get currentActiveOrderId {
+    if (_items.isEmpty) return null;
+    final index = _currentPageIndex.clamp(0, _items.length - 1);
+    return _items[index].broadcast.orderId;
+  }
+
+  List<String> get activeOrderIds =>
+      _items.map((e) => e.broadcast.orderId).toList();
+
+  bool hasBroadcast(String id) {
+    return _items.any((item) =>
+        item.broadcast.orderId == id ||
+        item.broadcast.broadcastId == id ||
+        item.broadcast.uniqueId == id);
+  }
+
+  /// Starts or appends a broadcast order to the multi-broadcast queue.
   void startBroadcast(OrderBroadcastModel broadcast) {
-    if (_broadcast?.orderId == broadcast.orderId) {
-      return; // Already active for this order
+    if (broadcast.orderId.isEmpty) return;
+
+    // Prevent duplicate entries
+    if (hasBroadcast(broadcast.orderId) ||
+        (broadcast.broadcastId.isNotEmpty &&
+            hasBroadcast(broadcast.broadcastId))) {
+      debugPrint(
+          '[OrderBroadcastManager] Broadcast ${broadcast.orderId} is already active.');
+      return;
     }
 
-    // Dismiss any previous broadcast
-    dismissAll();
-
-    _broadcast = broadcast;
     final rawSec = broadcast.timerSeconds;
-    _totalSeconds = (rawSec > 0 && rawSec <= 60) ? rawSec : 30;
-    _remainingSeconds = _totalSeconds;
-    remainingSecondsNotifier.value = _remainingSeconds;
-    _isDeclined = false;
-    _isAccepting = false;
+    final totalSec = rawSec > 0 ? rawSec : 30;
+    final remainingNotifier = ValueNotifier<int>(totalSec);
 
-    _startTimers();
+    final item = OrderBroadcastItem(
+      broadcast: broadcast,
+      totalSeconds: totalSec,
+      remainingSecondsNotifier: remainingNotifier,
+    );
+
+    // Setup per-card countdown timer
+    item.countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (item.remainingSecondsNotifier.value <= 1) {
+        timer.cancel();
+        _handleItemExpired(item);
+      } else {
+        item.remainingSecondsNotifier.value--;
+      }
+    });
+
+    _items.add(item);
+    itemsNotifier.value = List.unmodifiable(_items);
+
+    _playAlertWithThrottle(broadcast);
+    _startPeriodicHaptics();
+
+    if (_isDialogOpen) {
+      // Dialog is already open, carousel will dynamically show new card
+      debugPrint(
+          '[OrderBroadcastManager] Added broadcast ${broadcast.orderId} to existing carousel. Total: ${_items.length}');
+    } else if (_notchOverlay != null) {
+      // Minimized notch is active, refresh notch content
+      _showNotchOverlay();
+    } else {
+      // Show full carousel modal
+      _showCenterDialog();
+    }
+  }
+
+  void _playAlertWithThrottle(OrderBroadcastModel broadcast) {
+    final soundUrl = broadcast.soundUrl;
+    final hasSound = soundUrl != null && soundUrl.trim().isNotEmpty;
+    if (hasSound) {
+      // Keep the alert playing for as long as the broadcast card is visible.
+      final popupSeconds = broadcast.timerSeconds > 0
+          ? broadcast.timerSeconds
+          : (broadcast.soundDurationSeconds ?? 30);
+      final soundSeconds = broadcast.soundDurationSeconds != null &&
+              broadcast.soundDurationSeconds! > popupSeconds
+          ? broadcast.soundDurationSeconds!
+          : popupSeconds;
+      unawaited(BroadcastSoundPlayer.play(
+        soundUrl,
+        durationSeconds: soundSeconds,
+      ));
+    }
+
+    final now = DateTime.now();
+    if (_lastAlertTime == null ||
+        now.difference(_lastAlertTime!) > const Duration(milliseconds: 2000)) {
+      _lastAlertTime = now;
+      try {
+        HapticFeedback.heavyImpact();
+        if (!hasSound) SystemSound.play(SystemSoundType.alert);
+      } catch (_) {}
+    } else {
+      // Subtle medium impact if successive broadcasts hit rapidly
+      try {
+        HapticFeedback.mediumImpact();
+      } catch (_) {}
+    }
+  }
+
+  void _startPeriodicHaptics() {
+    if (_hapticTimer != null && _hapticTimer!.isActive) return;
+
+    _hapticTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (_items.isNotEmpty && !_items.any((e) => e.isAccepting)) {
+        try {
+          HapticFeedback.lightImpact();
+        } catch (_) {}
+      } else if (_items.isEmpty) {
+        _hapticTimer?.cancel();
+        _hapticTimer = null;
+      }
+    });
+  }
+
+  void _handleItemExpired(OrderBroadcastItem item) {
+    final orderNumber = item.broadcast.orderNumber.isNotEmpty
+        ? item.broadcast.orderNumber
+        : item.broadcast.orderId;
+
+    SocketService.instance.emitOrderDismiss(item.broadcast.orderId);
+    _removeItem(item);
+
+    final context = SessionGuard.navigatorKey.currentContext;
+    if (context != null) {
+      CustomSnackBar.showInfo(
+        context,
+        'Order #$orderNumber request timed out.',
+      );
+    }
+
+    if (_items.isEmpty) {
+      dismissAll();
+    }
+  }
+
+  /// Stops the broadcast sound once no request is waiting for a response.
+  void _syncBroadcastSound() {
+    if (_items.any((item) => !item.isAccepting)) return;
+    unawaited(BroadcastSoundPlayer.stop());
+  }
+
+  /// Re-opens the full popup when broadcasts are waiting behind the notch.
+  void bringToFront() {
+    if (_items.isEmpty || _isDialogOpen) return;
     _showCenterDialog();
   }
 
-  void _startTimers() {
-    _countdownTimer?.cancel();
-    _hapticTimer?.cancel();
+  void _removeItem(OrderBroadcastItem item) {
+    final index = _items.indexOf(item);
+    BroadcastNotificationService.cancel(item.broadcast.orderId);
+    item.dispose();
+    _items.remove(item);
+    itemsNotifier.value = List.unmodifiable(_items);
+    _syncBroadcastSound();
 
-    try {
-      HapticFeedback.heavyImpact();
-      SystemSound.play(SystemSoundType.alert);
-    } catch (_) {}
-
-    // Subtle vibration alert every 4 seconds
-    _hapticTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (!_isAccepting && _broadcast != null) {
-        HapticFeedback.mediumImpact();
-      }
-    });
-
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_remainingSeconds <= 1) {
-        timer.cancel();
-        _handleTimeExpired();
-      } else {
-        _remainingSeconds--;
-        remainingSecondsNotifier.value = _remainingSeconds;
-      }
-    });
+    if (_currentPageIndex >= _items.length && _items.isNotEmpty) {
+      _currentPageIndex = _items.length - 1;
+    }
   }
 
-  void _handleTimeExpired() {
-    dismissAll(showTimeoutMessage: true);
+  bool _isOwnClaim(String orderId, String? claimedByPartnerId) {
+    if (_acceptingOrderIds.contains(orderId)) return true;
+    for (final item in _items) {
+      final matches = item.broadcast.orderId == orderId ||
+          item.broadcast.broadcastId == orderId ||
+          item.broadcast.uniqueId == orderId;
+      if (matches && item.isAccepting) return true;
+    }
+    final mine = AuthSession.partnerId?.trim();
+    final claimed = claimedByPartnerId?.trim();
+    return mine != null &&
+        mine.isNotEmpty &&
+        claimed != null &&
+        claimed.isNotEmpty &&
+        mine == claimed;
+  }
+
+  /// Dismisses a specific order (e.g. claimed by another partner or socket dismiss).
+  void dismissOrder(
+    String orderId, {
+    String? reason,
+    String? claimedByPartnerId,
+  }) {
+    final ownClaim = _isOwnClaim(orderId, claimedByPartnerId);
+    OrderBroadcastItem? targetItem;
+    for (final item in _items) {
+      if (item.broadcast.orderId == orderId ||
+          item.broadcast.broadcastId == orderId ||
+          item.broadcast.uniqueId == orderId) {
+        targetItem = item;
+        break;
+      }
+    }
+
+    if (targetItem == null) return;
+
+    _removeItem(targetItem);
+
+    if (ownClaim) {
+      if (_items.isEmpty) dismissAll();
+      return;
+    }
+
+    final context = SessionGuard.navigatorKey.currentContext;
+    if (context != null && reason != null && reason.isNotEmpty) {
+      CustomSnackBar.showWarning(context, reason);
+    }
+
+    if (_items.isEmpty) {
+      dismissAll();
+    }
+  }
+
+  /// Handles action button decline for a specific card.
+  void handleDecline(BuildContext context, String orderId) {
+    handleNativeDecline(orderId);
+  }
+
+  /// Decline from the Android overlay / notification (no UI context required).
+  void handleNativeDecline(String orderId) {
+    OrderBroadcastItem? targetItem;
+    for (final item in _items) {
+      if (item.broadcast.orderId == orderId ||
+          item.broadcast.broadcastId == orderId) {
+        targetItem = item;
+        break;
+      }
+    }
+
+    if (targetItem != null) {
+      _removeItem(targetItem);
+    }
+
+    // Decline always cuts the alert as soon as this card is gone.
+    if (_items.isEmpty || !_items.any((item) => !item.isAccepting)) {
+      unawaited(BroadcastSoundPlayer.stop());
+    }
+
+    if (_items.isEmpty) {
+      dismissAll();
+    }
+  }
+
+  /// Handles accept action for a specific broadcast card.
+  Future<void> handleAccept(BuildContext context, String orderId) async {
+    OrderBroadcastItem? targetItem;
+    for (final item in _items) {
+      if (item.broadcast.orderId == orderId ||
+          item.broadcast.broadcastId == orderId) {
+        targetItem = item;
+        break;
+      }
+    }
+
+    if (targetItem == null || targetItem.isAccepting) return;
+
+    targetItem.isAccepting = true;
+    _acceptingOrderIds.add(orderId);
+    _acceptingOrderIds.add(targetItem.broadcast.orderId);
+    _acceptingOrderIds.add(targetItem.broadcast.broadcastId);
+    itemsNotifier.value = List.unmodifiable(_items);
+    // Accept stops the alert immediately, even while the API is still running.
+    unawaited(BroadcastSoundPlayer.stop());
+
+    final orderNumber = targetItem.broadcast.orderNumber.isNotEmpty
+        ? targetItem.broadcast.orderNumber
+        : targetItem.broadcast.orderId;
+
+    try {
+      await _ordersRepository.acceptBroadcastOrder(orderId);
+      unawaited(BroadcastNotificationService.stayInApp());
+
+      if (_items.contains(targetItem)) {
+        _removeItem(targetItem);
+      }
+
+      if (_items.isEmpty) {
+        _closeDialogOnly();
+      }
+
+      final currentCtx = SessionGuard.navigatorKey.currentContext;
+      if (currentCtx != null) {
+      CustomSnackBar.showSuccess(
+          currentCtx,
+          '🎉 Order #$orderNumber Accepted Successfully!',
+      );
+      }
+
+      // Navigate to active delivery order details screen
+      SessionGuard.navigatorKey.currentState?.pushNamed(
+        AppRoutes.orderDetailsScreen,
+        arguments: {
+          'orderId': orderId,
+          'orderNumber': orderNumber,
+          'enableWorkflow': true,
+          'isInTransit': true,
+        },
+      );
+    } catch (error) {
+      if (_items.contains(targetItem)) {
+        _removeItem(targetItem);
+      }
+
+      if (_items.isEmpty) {
+        _closeDialogOnly();
+      }
+
+      String msg = 'This order was already accepted by another partner.';
+      if (error is ApiException && error.message.isNotEmpty) {
+        msg = error.message;
+      }
+
+      final currentCtx = SessionGuard.navigatorKey.currentContext;
+      if (currentCtx != null) {
+        CustomSnackBar.showError(currentCtx, msg);
+      }
+    } finally {
+      _acceptingOrderIds.remove(orderId);
+      _acceptingOrderIds.remove(targetItem.broadcast.orderId);
+      _acceptingOrderIds.remove(targetItem.broadcast.broadcastId);
+    }
   }
 
   void _showCenterDialog() {
     final context = SessionGuard.navigatorKey.currentContext;
-    if (context == null || _broadcast == null) return;
+    if (context == null || _items.isEmpty) return;
 
     _removeNotchOverlay();
     _isDialogOpen = true;
 
     showDialog(
       context: context,
-      barrierDismissible: true, // Tapping outside minimizes to top notch!
+      barrierDismissible: true, // Tapping outside minimizes to top notch
       barrierColor: Colors.black.withValues(alpha: 0.8),
-      builder: (ctx) => _OrderBroadcastDialogCard(
-        broadcast: _broadcast!,
-        remainingSecondsNotifier: remainingSecondsNotifier,
-        totalSeconds: _totalSeconds,
-        onAccept: () => _handleAccept(ctx),
-        onDecline: () => _handleDecline(ctx),
-      ),
+      builder: (ctx) => const _OrderBroadcastCarouselDialog(),
     ).then((_) {
       _isDialogOpen = false;
-      // If closed by clicking outside (not accepted or declined), minimize to top notch
-      if (!_isAccepting && !_isDeclined && _broadcast != null && _remainingSeconds > 0) {
+      // If closed by tapping outside while broadcasts remain, minimize to top notch
+      if (_items.isNotEmpty) {
         _showNotchOverlay();
       }
     });
@@ -117,13 +417,10 @@ class OrderBroadcastManager {
   void _showNotchOverlay() {
     _removeNotchOverlay();
     final overlayState = SessionGuard.navigatorKey.currentState?.overlay;
-    if (overlayState == null || _broadcast == null) return;
+    if (overlayState == null || _items.isEmpty) return;
 
     _notchOverlay = OverlayEntry(
-      builder: (context) => _TopNotchContainer(
-        broadcast: _broadcast!,
-        remainingSecondsNotifier: remainingSecondsNotifier,
-        totalSeconds: _totalSeconds,
+      builder: (context) => _TopNotchMultiContainer(
         onTap: () {
           _removeNotchOverlay();
           _showCenterDialog();
@@ -139,135 +436,78 @@ class OrderBroadcastManager {
     _notchOverlay = null;
   }
 
-  Future<void> _handleDecline(BuildContext context) async {
-    _isDeclined = true;
-    final orderId = _broadcast?.orderId;
-    if (orderId != null && orderId.isNotEmpty) {
-      // Temporarily ignore this order so the driver is not re-prompted during this session
-      SocketService.instance.ignoreOrder(orderId);
-    }
-
-    _countdownTimer?.cancel();
-    _hapticTimer?.cancel();
-    _removeNotchOverlay();
-
+  void _closeDialogOnly() {
     if (_isDialogOpen) {
       _isDialogOpen = false;
-      if (Navigator.of(context, rootNavigator: true).canPop()) {
-        Navigator.of(context, rootNavigator: true).pop();
+      if (SessionGuard.navigatorKey.currentState?.canPop() == true) {
+        SessionGuard.navigatorKey.currentState?.pop();
       }
     }
-
-    _broadcast = null;
-  }
-
-  Future<void> _handleAccept(BuildContext context) async {
-    if (_isAccepting || _broadcast == null) return;
-    _isAccepting = true;
-
-    _countdownTimer?.cancel();
-    _hapticTimer?.cancel();
     _removeNotchOverlay();
-
-    final orderId = _broadcast!.orderId;
-    final orderNumber = _broadcast!.orderNumber;
-
-    final navigator = Navigator.of(context, rootNavigator: true);
-
-    try {
-      await _ordersRepository.acceptBroadcastOrder(orderId);
-
-      _isDialogOpen = false;
-      if (navigator.canPop()) {
-        navigator.pop();
-      }
-      _broadcast = null;
-
-      CustomSnackBar.showSuccess(
-        SessionGuard.navigatorKey.currentContext,
-        '🎉 Order Accepted Successfully!',
-      );
-
-      // Navigate to active delivery order details / workflow screen
-      SessionGuard.navigatorKey.currentState?.pushNamed(
-        AppRoutes.orderDetailsScreen,
-        arguments: {
-          'orderId': orderId,
-          'orderNumber': orderNumber,
-          'enableWorkflow': true,
-          'isInTransit': true,
-        },
-      );
-    } catch (error) {
-      _isDialogOpen = false;
-      if (navigator.canPop()) {
-        navigator.pop();
-      }
-      _broadcast = null;
-
-      String msg = 'This order was already accepted by another partner.';
-      if (error is ApiException && error.message.isNotEmpty) {
-        msg = error.message;
-      }
-
-      CustomSnackBar.showError(
-        SessionGuard.navigatorKey.currentContext,
-        msg,
-      );
-    } finally {
-      _isAccepting = false;
-    }
   }
 
-  /// Dismisses all modals and notch overlays cleanly.
+  /// Dismisses all broadcasts and closes modals/overlays cleanly.
   void dismissAll({bool showTimeoutMessage = false, String? reason}) {
-    _countdownTimer?.cancel();
-    _countdownTimer = null;
     _hapticTimer?.cancel();
     _hapticTimer = null;
+    unawaited(BroadcastSoundPlayer.stop());
+
+    for (final item in _items) {
+      BroadcastNotificationService.cancel(item.broadcast.orderId);
+      item.dispose();
+    }
+    _items.clear();
+    itemsNotifier.value = const [];
+    _currentPageIndex = 0;
 
     _removeNotchOverlay();
 
     if (_isDialogOpen) {
       _isDialogOpen = false;
+      if (SessionGuard.navigatorKey.currentState?.canPop() == true) {
       SessionGuard.navigatorKey.currentState?.pop();
+      }
     }
-
-    _broadcast = null;
-    _isAccepting = false;
-    _isDeclined = false;
 
     final context = SessionGuard.navigatorKey.currentContext;
     if (context != null) {
       if (showTimeoutMessage) {
-        CustomSnackBar.showInfo(
-          context,
-          'Order request timed out.',
-        );
+        CustomSnackBar.showInfo(context, 'Order request timed out.');
       } else if (reason != null && reason.isNotEmpty) {
-        CustomSnackBar.showWarning(
-          context,
-          reason,
-        );
+        CustomSnackBar.showWarning(context, reason);
       }
     }
   }
 }
 
-/// Compatibility wrapper for SocketService invocations.
+/// Compatibility wrapper for SocketService and FCM invocations.
 class OrderBroadcastBottomSheet {
   OrderBroadcastBottomSheet._();
 
   static String? get currentActiveOrderId =>
       OrderBroadcastManager.instance.currentActiveOrderId;
 
-  static void dismissActive(String orderId, {String? reason}) {
-    if (currentActiveOrderId == orderId) {
-      OrderBroadcastManager.instance.dismissAll(reason: reason);
-    }
+  static List<String> get activeOrderIds =>
+      OrderBroadcastManager.instance.activeOrderIds;
+
+  static void dismissActive(
+    String orderId, {
+    String? reason,
+    String? claimedByPartnerId,
+  }) {
+    OrderBroadcastManager.instance.dismissOrder(
+      orderId,
+      reason: reason,
+      claimedByPartnerId: claimedByPartnerId,
+    );
   }
 
-  static Future<void> show(BuildContext context, OrderBroadcastModel broadcast) async {
+  static void dismissAll({String? reason}) {
+      OrderBroadcastManager.instance.dismissAll(reason: reason);
+  }
+
+  static Future<void> show(
+      BuildContext context, OrderBroadcastModel broadcast) async {
     OrderBroadcastManager.instance.startBroadcast(broadcast);
   }
 }
@@ -313,19 +553,11 @@ Future<void> acceptBroadcastOrder({
   }
 }
 
-/// Floating Top Notch (Dynamic Island style) container showing live countdown timer.
-class _TopNotchContainer extends StatelessWidget {
-  final OrderBroadcastModel broadcast;
-  final ValueNotifier<int> remainingSecondsNotifier;
-  final int totalSeconds;
+/// Minimized Top Notch (Dynamic Island style) overlay supporting multiple broadcasts.
+class _TopNotchMultiContainer extends StatelessWidget {
   final VoidCallback onTap;
 
-  const _TopNotchContainer({
-    required this.broadcast,
-    required this.remainingSecondsNotifier,
-    required this.totalSeconds,
-    required this.onTap,
-  });
+  const _TopNotchMultiContainer({required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -337,7 +569,25 @@ class _TopNotchContainer extends StatelessWidget {
       right: 14.w,
       child: Material(
         color: Colors.transparent,
-        child: TweenAnimationBuilder<double>(
+        child: ValueListenableBuilder<List<OrderBroadcastItem>>(
+          valueListenable: OrderBroadcastManager.instance.itemsNotifier,
+          builder: (context, items, _) {
+            if (items.isEmpty) return const SizedBox.shrink();
+
+            final count = items.length;
+            final primaryItem = items.first;
+
+            // Find minimum remaining seconds across all active items
+            int minSeconds = primaryItem.remainingSecondsNotifier.value;
+            for (final item in items) {
+              if (item.remainingSecondsNotifier.value < minSeconds) {
+                minSeconds = item.remainingSecondsNotifier.value;
+              }
+            }
+
+            final isMultiple = count > 1;
+
+            return TweenAnimationBuilder<double>(
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOutBack,
           tween: Tween(begin: -30.0, end: 0.0),
@@ -374,31 +624,33 @@ class _TopNotchContainer extends StatelessWidget {
               ),
               child: Row(
                 children: [
-                  // Moped Icon with Gold Glow
+                      // Moped Icon or Multi Badge with Glow
                   Container(
                     padding: EdgeInsets.all(6.w),
                     decoration: BoxDecoration(
                       color: AppColours.primary.withValues(alpha: 0.15),
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(
-                      Icons.electric_moped,
+                        child: Icon(
+                          isMultiple ? Icons.layers_outlined : Icons.electric_moped,
                       color: AppColours.primary,
                       size: 17,
                     ),
                   ),
                   SizedBox(width: 10.w),
 
-                  // Order Details
+                      // Order Details / Count
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          broadcast.orderNumber.isNotEmpty
-                              ? '#${broadcast.orderNumber}'
-                              : 'New Order Request',
+                              isMultiple
+                                  ? '$count Incoming Orders Available'
+                                  : (primaryItem.broadcast.orderNumber.isNotEmpty
+                                      ? '#${primaryItem.broadcast.orderNumber}'
+                                      : 'New Order Request'),
                           style: CustomTextStyles.openSansBold.copyWith(
                             fontSize: 12.fSize,
                             color: Colors.white,
@@ -408,7 +660,9 @@ class _TopNotchContainer extends StatelessWidget {
                         ),
                         SizedBox(height: 1.h),
                         Text(
-                          'Tap to view • ${broadcast.formattedEarning}',
+                              isMultiple
+                                  ? 'Tap to swipe & review all'
+                                  : 'Tap to view • ${primaryItem.broadcast.formattedEarning}',
                           style: CustomTextStyles.openSansRegular.copyWith(
                             fontSize: 11.fSize,
                             color: AppColours.primary,
@@ -420,18 +674,20 @@ class _TopNotchContainer extends StatelessWidget {
 
                   SizedBox(width: 8.w),
 
-                  // Live Countdown Timer Badge
-                  ValueListenableBuilder<int>(
-                    valueListenable: remainingSecondsNotifier,
-                    builder: (context, seconds, _) {
-                      final isLow = seconds <= 5;
-                      return Container(
-                        padding: EdgeInsets.symmetric(horizontal: 10.w, vertical: 5.h),
+                      // Live Countdown Timer Badge (earliest expiry)
+                      Container(
+                        padding: EdgeInsets.symmetric(
+                            horizontal: 10.w, vertical: 5.h),
                         decoration: BoxDecoration(
-                          color: (isLow ? Colors.redAccent : AppColours.primary).withValues(alpha: 0.18),
+                          color: (minSeconds <= 5
+                                  ? Colors.redAccent
+                                  : AppColours.primary)
+                              .withValues(alpha: 0.18),
                           borderRadius: BorderRadius.circular(16),
                           border: Border.all(
-                            color: isLow ? Colors.redAccent : AppColours.primary,
+                            color: minSeconds <= 5
+                                ? Colors.redAccent
+                                : AppColours.primary,
                             width: 1.2,
                           ),
                         ),
@@ -441,98 +697,148 @@ class _TopNotchContainer extends StatelessWidget {
                             Icon(
                               Icons.timer_outlined,
                               size: 13.fSize,
-                              color: isLow ? Colors.redAccent : AppColours.primary,
+                              color: minSeconds <= 5
+                                  ? Colors.redAccent
+                                  : AppColours.primary,
                             ),
                             SizedBox(width: 4.w),
                             Text(
-                              '${seconds}s',
+                              '${minSeconds}s',
                               style: CustomTextStyles.montserratBold.copyWith(
                                 fontSize: 12.fSize,
-                                color: isLow ? Colors.redAccent : AppColours.primary,
+                                color: minSeconds <= 5
+                                    ? Colors.redAccent
+                                    : AppColours.primary,
                               ),
                             ),
                           ],
                         ),
-                      );
-                    },
                   ),
                 ],
               ),
             ),
           ),
+            );
+          },
         ),
       ),
     );
   }
 }
 
-/// Centered Dialog Card in the middle of the screen.
-class _OrderBroadcastDialogCard extends StatefulWidget {
-  final OrderBroadcastModel broadcast;
-  final ValueNotifier<int> remainingSecondsNotifier;
-  final int totalSeconds;
-  final VoidCallback onAccept;
-  final VoidCallback onDecline;
-
-  const _OrderBroadcastDialogCard({
-    required this.broadcast,
-    required this.remainingSecondsNotifier,
-    required this.totalSeconds,
-    required this.onAccept,
-    required this.onDecline,
-  });
+/// The Multi-Broadcast Swipeable Carousel Dialog featuring:
+/// - Horizontal swipeable PageView with page-snapping
+/// - Top Counter Badge (`Incoming Orders: 2 of 4`)
+/// - Dynamic animated Pagination Indicator Dots
+/// - Per-card timer, distance, kit details, pickup/delivery timeline, and actions
+class OrderBroadcastCarouselDialog extends StatefulWidget {
+  const OrderBroadcastCarouselDialog({super.key});
 
   @override
-  State<_OrderBroadcastDialogCard> createState() => _OrderBroadcastDialogCardState();
+  State<OrderBroadcastCarouselDialog> createState() =>
+      _OrderBroadcastCarouselDialogState();
 }
 
-class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
-  bool _isAccepting = false;
+typedef _OrderBroadcastCarouselDialog = OrderBroadcastCarouselDialog;
 
-  void _triggerAccept() {
-    if (_isAccepting) return;
-    setState(() => _isAccepting = true);
-    widget.onAccept();
+class _OrderBroadcastCarouselDialogState
+    extends State<_OrderBroadcastCarouselDialog> {
+  late PageController _pageController;
+  int _currentPage = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentPage = OrderBroadcastManager.instance.currentPageIndex;
+    _pageController = PageController(initialPage: _currentPage);
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  void _onPageChanged(int index) {
+    setState(() {
+      _currentPage = index;
+    });
+    OrderBroadcastManager.instance.currentPageIndex = index;
+  }
+
+  void _jumpToPage(int index) {
+    if (_pageController.hasClients) {
+      _pageController.animateToPage(
+        index,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Dialog(
       backgroundColor: Colors.transparent,
-      insetPadding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 24.h),
-      child: Container(
+      insetPadding: EdgeInsets.symmetric(horizontal: 14.w, vertical: 20.h),
+      child: ValueListenableBuilder<List<OrderBroadcastItem>>(
+        valueListenable: OrderBroadcastManager.instance.itemsNotifier,
+        builder: (context, items, _) {
+          if (items.isEmpty) {
+            return const SizedBox.shrink();
+          }
+
+          // Ensure active page is within bounds when an order is removed
+          if (_currentPage >= items.length) {
+            _currentPage = math.max(0, items.length - 1);
+            OrderBroadcastManager.instance.currentPageIndex = _currentPage;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (_pageController.hasClients) {
+                _pageController.jumpToPage(_currentPage);
+              }
+            });
+          }
+
+          final currentItem = items[_currentPage];
+          final totalOrders = items.length;
+          final isMultiple = totalOrders > 1;
+
+          return Container(
         decoration: BoxDecoration(
           color: const Color(0xFF14141B),
-          borderRadius: BorderRadius.circular(20),
+              borderRadius: BorderRadius.circular(22),
           border: Border.all(
-            color: AppColours.primary.withValues(alpha: 0.4),
+                color: AppColours.primary.withValues(alpha: 0.45),
             width: 1.5,
           ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.9),
-              blurRadius: 24,
-              offset: const Offset(0, 8),
+                  color: Colors.black.withValues(alpha: 0.95),
+                  blurRadius: 28,
+                  offset: const Offset(0, 10),
             ),
             BoxShadow(
-              color: AppColours.primary.withValues(alpha: 0.15),
-              blurRadius: 18,
+                  color: AppColours.primary.withValues(alpha: 0.18),
+                  blurRadius: 20,
               spreadRadius: 2,
             ),
           ],
         ),
         child: Padding(
-          padding: EdgeInsets.fromLTRB(16.w, 16.h, 16.w, 16.h),
-          child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(14.w, 14.h, 14.w, 14.h),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Top header: Badge, Order number, and circular countdown timer
+                  // Top Carousel Header: Counter Badge & Minimize Hint
                 Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Container(
-                      padding: EdgeInsets.symmetric(horizontal: 10.w, vertical: 4.h),
+                      // Counter badge / Request type
+                      Flexible(
+                        child: Container(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 10.w, vertical: 4.h),
                       decoration: BoxDecoration(
                         color: AppColours.primary.withValues(alpha: 0.15),
                         borderRadius: BorderRadius.circular(20),
@@ -543,17 +849,214 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(
-                            Icons.electric_moped,
+                              Icon(
+                                isMultiple
+                                    ? Icons.layers_outlined
+                                    : Icons.electric_moped,
                             color: AppColours.primary,
-                            size: 15,
+                                size: 14,
+                              ),
+                              SizedBox(width: 5.w),
+                              Flexible(
+                                child: Text(
+                                  isMultiple
+                                      ? 'Incoming Orders: ${_currentPage + 1} of $totalOrders'
+                                      : (currentItem.broadcast.flowType
+                                                  .toLowerCase()
+                                                  .trim() !=
+                                              'delivery'
+                                          ? 'NEW RETURN REQUEST'
+                                          : 'NEW ORDER REQUEST'),
+                                  style: CustomTextStyles.openSansBold.copyWith(
+                                    fontSize: 11.fSize,
+                                    color: AppColours.primary,
+                                    letterSpacing: 0.4,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      SizedBox(width: 8.w),
+
+                      // Swipe hint / Minimize indicator
+                      if (isMultiple)
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Swipe',
+                              style: CustomTextStyles.openSansRegular.copyWith(
+                                fontSize: 11.fSize,
+                                color: Colors.white54,
+                              ),
+                            ),
+                            SizedBox(width: 2.w),
+                            Icon(
+                              Icons.swipe_outlined,
+                              size: 14.fSize,
+                              color: Colors.white54,
+                            ),
+                          ],
+                        )
+                      else
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 8.w, vertical: 3.h),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            'Minimize',
+                            style: CustomTextStyles.openSansRegular.copyWith(
+                              fontSize: 10.fSize,
+                              color: Colors.white38,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+
+                  SizedBox(height: 10.h),
+
+                  // Horizontal Scrollable Carousel (Pager)
+                  Flexible(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: math.min(
+                            MediaQuery.of(context).size.height * 0.72, 380.h),
+                      ),
+                      child: PageView.builder(
+                        controller: _pageController,
+                        itemCount: totalOrders,
+                        onPageChanged: _onPageChanged,
+                        physics: const BouncingScrollPhysics(),
+                        itemBuilder: (context, index) {
+                          final item = items[index];
+                          return _StandaloneBroadcastCard(
+                            key: ValueKey(item.broadcast.uniqueId),
+                            item: item,
+                            onAccept: () => OrderBroadcastManager.instance
+                                .handleAccept(context, item.broadcast.orderId),
+                            onDecline: () => OrderBroadcastManager.instance
+                                .handleDecline(context, item.broadcast.orderId),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+
+                  // Pagination Indicator Dots
+                  if (isMultiple) ...[
+                    SizedBox(height: 12.h),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(totalOrders, (index) {
+                        final isSelected = index == _currentPage;
+                        return GestureDetector(
+                          onTap: () => _jumpToPage(index),
+                          behavior: HitTestBehavior.opaque,
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 250),
+                            curve: Curves.easeInOut,
+                            margin: EdgeInsets.symmetric(horizontal: 3.5.w),
+                            width: isSelected ? 22.w : 6.5.w,
+                            height: 6.5.h,
+                            decoration: BoxDecoration(
+                              color: isSelected
+                                  ? AppColours.primary
+                                  : Colors.white.withValues(alpha: 0.25),
+                              borderRadius: BorderRadius.circular(4),
+                              boxShadow: isSelected
+                                  ? [
+                                      BoxShadow(
+                                        color: AppColours.primary
+                                            .withValues(alpha: 0.55),
+                                        blurRadius: 6,
+                                        spreadRadius: 1,
+                                      ),
+                                    ]
+                                  : null,
+                            ),
+                          ),
+                        );
+                      }),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// A standalone broadcast card within the carousel
+class _StandaloneBroadcastCard extends StatelessWidget {
+  final OrderBroadcastItem item;
+  final VoidCallback onAccept;
+  final VoidCallback onDecline;
+
+  const _StandaloneBroadcastCard({
+    super.key,
+    required this.item,
+    required this.onAccept,
+    required this.onDecline,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final broadcast = item.broadcast;
+    final isDelivery = broadcast.flowType.toLowerCase().trim() == 'delivery';
+
+    return SingleChildScrollView(
+      physics: const BouncingScrollPhysics(),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Per-Card Header Row: Flow badge + Circular Countdown Timer
+          Row(
+            children: [
+              Container(
+                padding: EdgeInsets.symmetric(horizontal: 8.w, vertical: 3.h),
+                decoration: BoxDecoration(
+                  color: (isDelivery
+                          ? const Color(0xFF4ADE80)
+                          : const Color(0xFF38BDF8))
+                      .withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: (isDelivery
+                            ? const Color(0xFF4ADE80)
+                            : const Color(0xFF38BDF8))
+                        .withValues(alpha: 0.6),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      isDelivery ? Icons.directions_bike : Icons.replay,
+                      color: isDelivery
+                          ? const Color(0xFF4ADE80)
+                          : const Color(0xFF38BDF8),
+                      size: 13,
                           ),
                           SizedBox(width: 4.w),
                           Text(
-                            'NEW ORDER REQUEST',
+                      isDelivery ? 'DELIVERY' : 'RETURN',
                             style: CustomTextStyles.openSansBold.copyWith(
                               fontSize: 10.fSize,
-                              color: AppColours.primary,
+                        color: isDelivery
+                            ? const Color(0xFF4ADE80)
+                            : const Color(0xFF38BDF8),
                               letterSpacing: 0.5,
                             ),
                           ),
@@ -561,17 +1064,21 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                       ),
                     ),
                     const Spacer(),
-                    // Circular Countdown Timer
+
+              // Circular Countdown Timer for this specific card
                     ValueListenableBuilder<int>(
-                      valueListenable: widget.remainingSecondsNotifier,
+                valueListenable: item.remainingSecondsNotifier,
                       builder: (context, seconds, _) {
-                        final progress = widget.totalSeconds > 0
-                            ? (seconds / widget.totalSeconds)
+                  final progress = item.totalSeconds > 0
+                      ? (seconds / item.totalSeconds)
                             : 0.0;
                         final isLow = seconds <= 5;
-                        return Container(
-                          width: 46.w,
-                          height: 46.w,
+
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 5,top: 5),
+                    child: Container(
+                      width: 42.w,
+                      height: 42.w,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: const Color(0xFF1E1E28),
@@ -598,21 +1105,24 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                                 ),
                               ),
                               Padding(
-                                padding: EdgeInsets.all(6.w),
+                            padding: EdgeInsets.all(5.w),
                                 child: FittedBox(
                                   fit: BoxFit.scaleDown,
                                   child: Text(
                                     '$seconds',
                                     textAlign: TextAlign.center,
                                     style: CustomTextStyles.montserratBold.copyWith(
-                                      fontSize: 14.fSize,
+                                  fontSize: 13.fSize,
                                       fontWeight: FontWeight.w800,
-                                      color: isLow ? Colors.redAccent : AppColours.primary,
+                                  color: isLow
+                                      ? Colors.redAccent
+                                      : AppColours.primary,
                                     ),
                                   ),
                                 ),
                               ),
                             ],
+                      ),
                           ),
                         );
                       },
@@ -620,14 +1130,14 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                   ],
                 ),
 
-                SizedBox(height: 12.h),
+          SizedBox(height: 10.h),
 
-                // Order Number & Earning Card
+          // Order Number & Earning Container
                 Container(
-                  padding: EdgeInsets.symmetric(horizontal: 14.w, vertical: 12.h),
+            padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 10.h),
                   decoration: BoxDecoration(
                     color: const Color(0xFF1E1E28),
-                    borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(14),
                     border: Border.all(
                       color: AppColours.primary.withValues(alpha: 0.25),
                     ),
@@ -641,18 +1151,18 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                           Text(
                             'ORDER NUMBER',
                             style: CustomTextStyles.openSansRegular.copyWith(
-                              fontSize: 10.fSize,
+                        fontSize: 9.5.fSize,
                               color: AppColours.grey,
                               letterSpacing: 0.5,
                             ),
                           ),
                           SizedBox(height: 2.h),
                           Text(
-                            widget.broadcast.orderNumber.isNotEmpty
-                                ? '#${widget.broadcast.orderNumber}'
-                                : '#${widget.broadcast.orderId}',
+                      broadcast.orderNumber.isNotEmpty
+                          ? '#${broadcast.orderNumber}'
+                          : '#${broadcast.orderId}',
                             style: CustomTextStyles.montserratBold.copyWith(
-                              fontSize: 15.fSize,
+                        fontSize: 14.fSize,
                               color: Colors.white,
                             ),
                           ),
@@ -664,16 +1174,16 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                           Text(
                             'YOU EARN',
                             style: CustomTextStyles.openSansRegular.copyWith(
-                              fontSize: 10.fSize,
+                        fontSize: 9.5.fSize,
                               color: AppColours.primary,
                               letterSpacing: 0.5,
                             ),
                           ),
                           SizedBox(height: 2.h),
                           Text(
-                            widget.broadcast.formattedEarning,
+                      broadcast.formattedEarning,
                             style: CustomTextStyles.montserratBold.copyWith(
-                              fontSize: 20.fSize,
+                        fontSize: 19.fSize,
                               color: AppColours.primary,
                             ),
                           ),
@@ -683,14 +1193,45 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                   ),
                 ),
 
-                SizedBox(height: 14.h),
+          // Details Row: Distance, Items count, and Kit Details Badges
+          if (broadcast.formattedDistance != null ||
+              broadcast.itemsCountLabel != null ||
+              broadcast.kitDetailsLabel != null) ...[
+            SizedBox(height: 8.h),
+            Wrap(
+              spacing: 6.w,
+              runSpacing: 4.h,
+              children: [
+                if (broadcast.formattedDistance != null)
+                  _DetailBadge(
+                    icon: Icons.near_me_outlined,
+                    label: broadcast.formattedDistance!,
+                    color: const Color(0xFF60A5FA),
+                  ),
+                if (broadcast.itemsCountLabel != null)
+                  _DetailBadge(
+                    icon: Icons.shopping_bag_outlined,
+                    label: broadcast.itemsCountLabel!,
+                    color: const Color(0xFFA78BFA),
+                  ),
+                if (broadcast.kitDetailsLabel != null)
+                  _DetailBadge(
+                    icon: Icons.inventory_2_outlined,
+                    label: broadcast.kitDetailsLabel!,
+                    color: const Color(0xFFFBBF24),
+                  ),
+              ],
+            ),
+          ],
 
-                // Pickup & Delivery Route section
+          SizedBox(height: 10.h),
+
+          // Pickup & Delivery Route Section
                 Container(
-                  padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 12.h),
+            padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 10.h),
                   decoration: BoxDecoration(
                     color: const Color(0xFF1B1B24),
-                    borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(12),
                   ),
                   child: Column(
                     children: [
@@ -700,30 +1241,32 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                         children: [
                           Container(
                             margin: EdgeInsets.only(top: 2.h),
-                            width: 10.w,
-                            height: 10.w,
+                      width: 9.w,
+                      height: 9.w,
                             decoration: const BoxDecoration(
                               color: Color(0xFF4ADE80),
                               shape: BoxShape.circle,
                             ),
                           ),
-                          SizedBox(width: 10.w),
+                    SizedBox(width: 8.w),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'PICKUP',
+                            !isDelivery
+                                ? 'PICKUP (CUSTOMER)'
+                                : 'PICKUP (IAP HUB)',
                                   style: CustomTextStyles.openSansBold.copyWith(
-                                    fontSize: 10.fSize,
+                              fontSize: 9.5.fSize,
                                     color: const Color(0xFF4ADE80),
                                   ),
                                 ),
                                 SizedBox(height: 2.h),
                                 Text(
-                                  widget.broadcast.pickupAddress,
+                            broadcast.pickupAddress,
                                   style: CustomTextStyles.openSansMedium.copyWith(
-                                    fontSize: 12.fSize,
+                              fontSize: 11.5.fSize,
                                     color: Colors.white,
                                   ),
                                   maxLines: 2,
@@ -737,12 +1280,12 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
 
                       // Connecting route line
                       Padding(
-                        padding: EdgeInsets.only(left: 4.w, top: 2.h, bottom: 2.h),
+                  padding: EdgeInsets.only(left: 3.5.w, top: 2.h, bottom: 2.h),
                         child: Align(
                           alignment: Alignment.centerLeft,
                           child: Container(
                             width: 2,
-                            height: 16.h,
+                      height: 14.h,
                             color: Colors.white24,
                           ),
                         ),
@@ -754,30 +1297,32 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                         children: [
                           Container(
                             margin: EdgeInsets.only(top: 2.h),
-                            width: 10.w,
-                            height: 10.w,
+                      width: 9.w,
+                      height: 9.w,
                             decoration: const BoxDecoration(
                               color: AppColours.primary,
                               shape: BoxShape.circle,
                             ),
                           ),
-                          SizedBox(width: 10.w),
+                    SizedBox(width: 8.w),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'DELIVERY',
+                            !isDelivery
+                                ? 'DROP-OFF (IAP HUB)'
+                                : 'DELIVERY (CUSTOMER)',
                                   style: CustomTextStyles.openSansBold.copyWith(
-                                    fontSize: 10.fSize,
+                              fontSize: 9.5.fSize,
                                     color: AppColours.primary,
                                   ),
                                 ),
                                 SizedBox(height: 2.h),
                                 Text(
-                                  widget.broadcast.deliveryAddress,
+                            broadcast.deliveryAddress,
                                   style: CustomTextStyles.openSansMedium.copyWith(
-                                    fontSize: 12.fSize,
+                              fontSize: 11.5.fSize,
                                     color: Colors.white,
                                   ),
                                   maxLines: 2,
@@ -792,12 +1337,12 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                   ),
                 ),
 
-                SizedBox(height: 16.h),
+          SizedBox(height: 12.h),
 
-                // Action Buttons: Decline & Accept Order (Both exactly height 44)
+          // Individual Action Buttons for this card: Decline & Accept
                 Row(
                   children: [
-                    // Decline Button (Height: 44)
+              // Decline Button
                     Expanded(
                       flex: 2,
                       child: SizedBox(
@@ -813,11 +1358,11 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                             padding: EdgeInsets.zero,
                             backgroundColor: Colors.transparent,
                           ),
-                          onPressed: _isAccepting ? null : widget.onDecline,
+                    onPressed: item.isAccepting ? null : onDecline,
                           child: Text(
                             'Decline',
                             style: CustomTextStyles.openSansSemiBold.copyWith(
-                              fontSize: 14.fSize,
+                        fontSize: 13.5.fSize,
                               color: AppColours.grey,
                             ),
                           ),
@@ -825,22 +1370,60 @@ class _OrderBroadcastDialogCardState extends State<_OrderBroadcastDialogCard> {
                       ),
                     ),
 
-                    SizedBox(width: 12.w),
+              SizedBox(width: 10.w),
 
-                    // Animated Accept Order Button (Height: 44)
+              // Animated Accept Order Button
                     Expanded(
-                      flex: 4,
+                flex: 3,
                       child: _AnimatedAcceptOrderButton(
-                        isAccepting: _isAccepting,
-                        onPressed: _isAccepting ? null : _triggerAccept,
+                  isAccepting: item.isAccepting,
+                  onPressed: item.isAccepting ? null : onAccept,
                       ),
                     ),
                   ],
                 ),
               ],
             ),
-          ),
+    );
+  }
+}
+
+/// Small visual chip badge for distance, items count, and kit details.
+class _DetailBadge extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  const _DetailBadge({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 8.w, vertical: 3.h),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: color.withValues(alpha: 0.35),
         ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12.fSize, color: color),
+          SizedBox(width: 4.w),
+          Text(
+            label,
+            style: CustomTextStyles.openSansSemiBold.copyWith(
+              fontSize: 10.5.fSize,
+              color: color,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -944,7 +1527,8 @@ class _AnimatedAcceptOrderButtonState extends State<_AnimatedAcceptOrderButton>
               ),
               boxShadow: [
                 BoxShadow(
-                  color: AppColours.primary.withValues(alpha: _glowAnimation.value),
+                  color:
+                      AppColours.primary.withValues(alpha: _glowAnimation.value),
                   blurRadius: 10 + 6 * _scaleAnimation.value,
                   spreadRadius: 1 + 2 * _scaleAnimation.value,
                   offset: const Offset(0, 2),
@@ -1001,7 +1585,7 @@ class _AnimatedAcceptOrderButtonState extends State<_AnimatedAcceptOrderButton>
                             Text(
                               'Accept Order',
                               style: CustomTextStyles.openSansBold.copyWith(
-                                fontSize: 14.fSize,
+                                fontSize: 13.5.fSize,
                                 color: Colors.black,
                                 letterSpacing: 0.3,
                               ),

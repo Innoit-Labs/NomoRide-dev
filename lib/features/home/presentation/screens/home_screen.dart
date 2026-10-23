@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/services/auth_session.dart';
+import '../../../../core/services/broadcast_notification_service.dart';
+import '../../../../core/services/socket_service.dart';
 import '../../../../core/utils/icon_constant.dart';
 import '../../../../theme/theme_helper.dart';
 import '../../../../routes/app_routes.dart';
@@ -28,7 +31,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final DashboardRepository _dashboardRepository = DashboardRepository();
   final OrdersRepository _ordersRepository = OrdersRepository();
   final ProfileRepository _profileRepository = ProfileRepository();
@@ -37,36 +40,99 @@ class _HomeScreenState extends State<HomeScreen> {
   final Set<String> _updatingOrderNumbers = {};
   bool _isLoadingDashboard = true;
   bool _isLoadingOrders = true;
+  bool _isLoadingProfile = true;
   String? _dashboardError;
   String? _ordersError;
   String? _partnerDisplayName;
   String? _partnerPhotoUrl;
+  bool _isOnline = ProfileRepository.currentOnlineStatus;
+  bool _isUpdatingOnline = false;
   DashboardData? _dashboardData;
   List<DpOrder> _orders = [];
 
-  bool get _isLoading => _isLoadingDashboard || _isLoadingOrders;
+  Timer? _pollingTimer;
+  StreamSubscription<void>? _orderUpdateSubscription;
+  bool _isSilentRefreshing = false;
+  DateTime? _lastSilentFetchTime;
+
+  bool get _isLoading =>
+      _isLoadingDashboard || _isLoadingOrders || _isLoadingProfile;
 
   @override
   void initState() {
     super.initState();
-    _loadHomeData();
+    WidgetsBinding.instance.addObserver(this);
+    _isOnline = ProfileRepository.currentOnlineStatus;
+    _orderUpdateSubscription =
+        SocketService.instance.onOrderUpdate.listen((_) {
+      _refreshOrdersSilently();
+    });
+    _initOnlineStatusAndLoadData();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      BroadcastNotificationService.markHomeReady();
+      if (mounted) BroadcastNotificationService.promptOverlayPermission(context);
+    });
+  }
+
+  Future<void> _initOnlineStatusAndLoadData() async {
+    final persisted = await ProfileRepository.restoreOnlineStatus();
+    if (mounted && _isOnline != persisted) {
+      setState(() => _isOnline = persisted);
+    }
+    await _loadHomeData();
+    if (mounted && _isOnline) {
+      _startPollingTimer();
+      BroadcastNotificationService.setOnline(true);
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Reconnect socket if it dropped while backgrounded
+      SocketService.instance.initAndConnect();
+      // Silently fetch latest orders immediately on app resume
+      _refreshOrdersSilently();
+      if (_isOnline) {
+        _startPollingTimer();
+        BroadcastNotificationService.setOnline(true);
+      }
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _stopPollingTimer();
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _orderUpdateSubscription?.cancel();
+    _stopPollingTimer();
     HomeScreen.isHomeLoadingNotifier.value = false;
     super.dispose();
   }
 
-  Future<void> _loadHomeData({bool forceRefreshProfile = false}) async {
-    debugPrint('========== CURRENT AUTH TOKEN ==========');
-    debugPrint('authToken: ${AuthSession.authToken}');
-    debugPrint('========================================');
+  void _startPollingTimer() {
+    _pollingTimer?.cancel();
+    if (!_isOnline) return;
+    _pollingTimer = Timer.periodic(const Duration(seconds: 45), (_) {
+      if (mounted && _isOnline) {
+        _refreshOrdersSilently();
+      }
+    });
+  }
 
+  void _stopPollingTimer() {
+    _pollingTimer?.cancel();
+    _pollingTimer = null;
+  }
+
+  Future<void> _loadHomeData({bool forceRefreshProfile = false}) async {
     HomeScreen.isHomeLoadingNotifier.value = true;
     setState(() {
       _isLoadingDashboard = true;
       _isLoadingOrders = true;
+      _isLoadingProfile = true;
       _dashboardError = null;
       _ordersError = null;
     });
@@ -82,6 +148,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (!mounted) return;
 
+    if (profile != null) {
+      _profileRepository.syncSavedStatusWithBackend(profile);
+    }
+
     setState(() {
       final name = profile?.fullName.trim();
       _partnerDisplayName =
@@ -89,6 +159,10 @@ class _HomeScreenState extends State<HomeScreen> {
       final photo = profile?.profilePhotoUrl?.trim();
       _partnerPhotoUrl =
           photo != null && photo.isNotEmpty ? photo : null;
+
+      // Always reflect the actual saved availability status.
+      // Do not automatically switch between Online and Offline on screen navigation or API refresh.
+      _isOnline = ProfileRepository.currentOnlineStatus;
 
       if (dashboardResult is DashboardData) {
         _dashboardData = dashboardResult;
@@ -99,30 +173,38 @@ class _HomeScreenState extends State<HomeScreen> {
       _isLoadingDashboard = false;
 
       if (ordersResult is List<DpOrder>) {
-        _orders = ordersResult
+        final visible = ordersResult
             .where((order) => order.isVisibleOnHomeAssigned)
             .toList();
+        final seen = <String>{};
+        _orders = visible.where((order) {
+          final key = order.orderNumber.isNotEmpty
+              ? order.orderNumber
+              : (order.id ?? '');
+          return key.isNotEmpty && seen.add(key);
+        }).toList();
         _ordersError = null;
       } else {
         _ordersError = ordersResult?.toString() ?? 'Failed to load orders.';
       }
       _isLoadingOrders = false;
+      _isLoadingProfile = false;
     });
 
     HomeScreen.isHomeLoadingNotifier.value = false;
   }
 
-  Future<Object?> _loadDashboardSafe() async {
+  Future<Object?> _loadDashboardSafe({bool log = true}) async {
     try {
-      return await _dashboardRepository.getDashboardData();
+      return await _dashboardRepository.getDashboardData(log: log);
     } catch (error) {
       return error;
     }
   }
 
-  Future<Object?> _loadOrdersSafe() async {
+  Future<Object?> _loadOrdersSafe({bool log = true}) async {
     try {
-      return await _ordersRepository.getDpOrders();
+      return await _ordersRepository.getDpOrders(log: log);
     } catch (error) {
       return error;
     }
@@ -147,11 +229,19 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _updatingOrderNumbers.add(order.orderNumber));
 
     try {
-      await _ordersRepository.updateOrderStatus(
+      final updated = await _ordersRepository.updateOrderStatus(
         order: order,
         status: 'start',
       );
       if (!mounted) return;
+
+      try {
+        final fresh = await _ordersRepository.refreshOrderDetails(updated);
+        _replaceOrder(fresh);
+      } catch (_) {
+        _replaceOrder(updated);
+      }
+
       final refreshed = await _ordersRepository.getDpOrders();
       if (!mounted) return;
       setState(() {
@@ -159,6 +249,21 @@ class _HomeScreenState extends State<HomeScreen> {
             .where((order) => order.isVisibleOnHomeAssigned)
             .toList();
       });
+
+      if (mounted) {
+        final current = _orders.firstWhere(
+          (o) => o.orderNumber == order.orderNumber,
+          orElse: () => updated,
+        );
+        Navigator.pushNamed(
+          context,
+          AppRoutes.orderDetailsScreen,
+          arguments: {
+            'order': current,
+            'enableWorkflow': true,
+          },
+        );
+      }
     } catch (error) {
       if (!mounted) return;
       CustomSnackBar.showError(context, error.toString());
@@ -169,9 +274,39 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _setOnline(bool value) async {
+    if (_isUpdatingOnline || value == _isOnline) return;
+    setState(() => _isUpdatingOnline = true);
+    try {
+      final updated = await _profileRepository.updateIsOnline(value);
+      if (!mounted) return;
+      await ProfileRepository.saveOnlineStatus(updated);
+      if (!mounted) return;
+      setState(() => _isOnline = updated);
+      if (updated) {
+        _startPollingTimer();
+        _refreshOrdersSilently();
+      } else {
+        _stopPollingTimer();
+      }
+      BroadcastNotificationService.setOnline(updated);
+      CustomSnackBar.showSuccess(
+        context,
+        updated ? 'You are online' : 'You are offline',
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _isOnline = ProfileRepository.currentOnlineStatus);
+      CustomSnackBar.showError(context, error.toString());
+    } finally {
+      if (mounted) setState(() => _isUpdatingOnline = false);
+    }
+  }
+
   void _replaceOrder(DpOrder updated) {
     setState(() {
-      if (updated.isNotDelivered) {
+      if (updated.isReturnedToIap ||
+          (updated.isNotDelivered && !updated.isUndeliveredReturnToHub)) {
         _orders = _orders
             .where((item) => item.orderNumber != updated.orderNumber)
             .toList();
@@ -184,6 +319,99 @@ class _HomeScreenState extends State<HomeScreen> {
           .where((order) => order.isVisibleOnHomeAssigned)
           .toList();
     });
+  }
+
+  Future<void> _refreshOrdersSilently() async {
+    if (!mounted || _isLoadingOrders || _isSilentRefreshing) return;
+
+    final now = DateTime.now();
+    if (_lastSilentFetchTime != null &&
+        now.difference(_lastSilentFetchTime!) <
+            const Duration(seconds: 3)) {
+      return;
+    }
+
+    _isSilentRefreshing = true;
+    _lastSilentFetchTime = now;
+
+    try {
+      final ordersResult = await _loadOrdersSafe(log: false);
+      if (!mounted) return;
+
+      bool stateChanged = false;
+      List<DpOrder>? updatedOrders;
+
+      if (ordersResult is List<DpOrder>) {
+        final visible = ordersResult
+            .where((order) => order.isVisibleOnHomeAssigned)
+            .toList();
+        final seen = <String>{};
+        final uniqueOrders = visible.where((order) {
+          final key = order.orderNumber.isNotEmpty
+              ? order.orderNumber
+              : (order.id ?? '');
+          return key.isNotEmpty && seen.add(key);
+        }).toList();
+
+        if (!_areOrdersEqual(_orders, uniqueOrders)) {
+          updatedOrders = uniqueOrders;
+          stateChanged = true;
+        }
+      }
+
+      DashboardData? updatedDashboard;
+      // Only fetch dashboard if orders actually changed!
+      if (stateChanged) {
+        final dashboardResult = await _loadDashboardSafe(log: false);
+        if (dashboardResult is DashboardData) {
+          updatedDashboard = dashboardResult;
+        }
+      }
+
+      if (stateChanged && mounted) {
+        setState(() {
+          if (updatedOrders != null) {
+            _orders = updatedOrders;
+            _ordersError = null;
+          }
+          if (updatedDashboard != null) {
+            _dashboardData = updatedDashboard;
+            _dashboardError = null;
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('[HomeScreen] Silent order refresh error: $e');
+    } finally {
+      _isSilentRefreshing = false;
+    }
+  }
+
+  bool _areOrdersEqual(List<DpOrder> a, List<DpOrder> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      final oA = a[i];
+      final oB = b[i];
+      if (oA.orderNumber != oB.orderNumber ||
+          oA.id != oB.id ||
+          oA.status != oB.status ||
+          oA.subStatus != oB.subStatus ||
+          oA.flowType != oB.flowType ||
+          oA.pickupConfirmedAt != oB.pickupConfirmedAt ||
+          oA.arrivedAtDeliveryAt != oB.arrivedAtDeliveryAt ||
+          oA.deliveredAt != oB.deliveredAt ||
+          oA.completedAt != oB.completedAt ||
+          oA.arrivedAtIapAt != oB.arrivedAtIapAt ||
+          oA.inTransitAt != oB.inTransitAt ||
+          oA.rtoStatus != oB.rtoStatus ||
+          oA.returnedToIapAt != oB.returnedToIapAt ||
+          oA.rtoCompletedAt != oB.rtoCompletedAt ||
+          oA.amount != oB.amount) {
+        return false;
+      }
+    }
+    return true;
   }
 
   @override
@@ -217,16 +445,29 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    SizedBox(height: 24.h),
+                    SizedBox(height: 16.h),
+                    _buildOnlineToggleCard(),
+                    SizedBox(height: 16.h),
                     _buildStatsRow(),
-              SizedBox(height: 32.h),
-              Text(
-                'Orders Assigned',
-                style: CustomTextStyles.montserratBold.copyWith(
-                  fontSize: 18.fSize,
-                  color: AppColours.secondary,
-                ),
-              ),
+              SizedBox(height: 16.h),
+              _isLoading
+                  ? Padding(
+                      padding: EdgeInsets.only(bottom: 4.h),
+                      child: AppShimmer(
+                        child: AppShimmer.box(
+                          width: 140.w,
+                          height: 20.h,
+                          borderRadius: 6,
+                        ),
+                      ),
+                    )
+                  : Text(
+                      'Orders Assigned',
+                      style: CustomTextStyles.montserratBold.copyWith(
+                        fontSize: 18.fSize,
+                        color: AppColours.secondary,
+                      ),
+                    ),
               SizedBox(height: 16.h),
               _buildOrdersSection(),
                     SizedBox(height: 100.h), // Space for bottom bar
@@ -324,7 +565,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         SizedBox(width: 8.w),
-
         GestureDetector(
           onTap: () async {
             await Navigator.push(
@@ -351,7 +591,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         width: 9.w,
                         height: 9.w,
                         decoration: BoxDecoration(
-                          color: const Color(0xFFFF4B4B),
+                          color: AppColours.primary,
                           shape: BoxShape.circle,
                           border: Border.all(
                             color: Colors.black,
@@ -375,8 +615,70 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildOnlineToggleCard() {
+    if (_isLoading) {
+      return const HomeOnlineToggleShimmer();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 8.h),
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColours.primary.withValues(alpha: 0.7)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 10.w,
+                height: 10.w,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _isOnline
+                      ? const Color(0xFF34A853)
+                      : const Color(0xFF9CA3AF),
+                ),
+              ),
+              SizedBox(width: 8.w),
+              Text(
+                _isOnline ? 'Your Online' : 'Your Offline',
+                style: CustomTextStyles.openSansSemiBold.copyWith(
+                  fontSize: 15.fSize,
+                  color: AppColours.primary.withValues(alpha: 0.9),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          Transform.scale(
+            scale: 0.9,
+            child: Switch(
+              value: _isOnline,
+              onChanged: _isUpdatingOnline ? null : _setOnline,
+              thumbColor: WidgetStateProperty.resolveWith<Color?>((states) {
+                if (states.contains(WidgetState.selected)) {
+                  return Colors.black;
+                }
+                return const Color(0xFFF5E6C8);
+              }),
+              activeTrackColor: const Color(0xFFE6C27A),
+              inactiveTrackColor: const Color(0xFF2A2A32),
+              trackOutlineColor: WidgetStateProperty.all(Colors.transparent),
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildStatsRow() {
-    if (_isLoadingDashboard) {
+    if (_isLoading) {
       return const HomeStatsShimmer();
     }
 
@@ -387,7 +689,7 @@ class _HomeScreenState extends State<HomeScreen> {
         decoration: BoxDecoration(
           color: Colors.black87,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: AppColours.primary.withOpacity(0.3)),
+          border: Border.all(color: AppColours.primary.withValues(alpha: 0.3)),
         ),
         child: Column(
           children: [
@@ -425,7 +727,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildOrdersSection() {
-    if (_isLoadingOrders) {
+    if (_isLoading) {
       return const HomeOrdersShimmer();
     }
 
@@ -436,7 +738,7 @@ class _HomeScreenState extends State<HomeScreen> {
         decoration: BoxDecoration(
           color: Colors.black87,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: AppColours.primary.withOpacity(0.3)),
+          border: Border.all(color: AppColours.primary.withValues(alpha: 0.3)),
         ),
         child: Column(
           children: [
@@ -469,7 +771,7 @@ class _HomeScreenState extends State<HomeScreen> {
           color: Colors.black87,
           borderRadius: BorderRadius.circular(24),
           border: Border.all(
-            color: AppColours.primary.withOpacity(0.5),
+            color: AppColours.primary.withValues(alpha: 0.5),
             width: 1,
           ),
         ),
@@ -489,7 +791,7 @@ class _HomeScreenState extends State<HomeScreen> {
         color: Colors.black87,
         borderRadius: BorderRadius.circular(24),
         border: Border.all(
-          color: AppColours.primary.withOpacity(0.5),
+          color: AppColours.primary.withValues(alpha: 0.5),
           width: 1,
         ),
       ),
@@ -554,6 +856,35 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildStatusHeaderBadge(DpOrder order) {
+    final badge = order.journey.statusBadgeInfo;
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 8.w, vertical: 4.h),
+      decoration: BoxDecoration(
+        color: badge.backgroundColor,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: badge.color.withValues(alpha: 0.5),
+          width: 0.8,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(badge.icon, size: 12.h, color: badge.color),
+          SizedBox(width: 4.w),
+          Text(
+            badge.label,
+            style: CustomTextStyles.montserratBold.copyWith(
+              fontSize: 11.fSize,
+              color: badge.color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildOrderItem({
     required DpOrder order,
     required bool isUpdating,
@@ -595,7 +926,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
-              if (order.amount != null && ProfileRepository.showsPartnerEarning)
+              if (order.displayPartnerEarning != null &&
+                  ProfileRepository.showsPartnerEarning)
                 Container(
                   padding:
                       EdgeInsets.symmetric(horizontal: 16.w, vertical: 8.h),
@@ -604,7 +936,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
-                    '₹ ${order.amount}',
+                    '₹ ${order.displayPartnerEarning}',
                     style: CustomTextStyles.openSansBold.copyWith(
                       fontSize: 14.fSize,
                       color: AppColours.primary.withValues(alpha: 0.8),
@@ -614,24 +946,47 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ),
           SizedBox(height: 8.h),
-          Text(
-            order.orderNumber,
-            style: CustomTextStyles.openSansRegular.copyWith(
-              fontSize: 12.fSize,
-              color: AppColours.secondary,
-            ),
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            runSpacing: 6.h,
+            children: [
+              Text(
+                order.orderNumber,
+                style: CustomTextStyles.openSansRegular.copyWith(
+                  fontSize: 12.fSize,
+                  color: AppColours.secondary,
+                ),
+              ),
+              SizedBox(width: 20),
+              _buildStatusHeaderBadge(order),
+            ],
           ),
-          if (order.pickupAddress != null) ...[
+          if (order.isUndeliveredReturnToHub
+                  ? (order.rtoReturnAddress ?? order.pickupAddress) != null
+                  : order.pickupAddress != null) ...[
             SizedBox(height: 20.h),
             _buildLocationRow(
               Icons.location_on_outlined,
-              'Pickup location',
-              order.pickupAddress!,
+              order.isUndeliveredReturnToHub
+                  ? (order.rtoHubName != null && order.rtoHubName!.isNotEmpty
+                      ? order.rtoHubName!
+                      : 'IAP Store (Return Destination)')
+                  : 'Pickup location',
+              order.isUndeliveredReturnToHub
+                  ? (order.rtoReturnAddress ?? order.pickupAddress!)
+                  : order.pickupAddress!,
               mapEnabled: true,
               onMapTap: () => _openMaps(
-                latitude: order.pickupLatitude,
-                longitude: order.pickupLongitude,
-                address: order.pickupAddress!,
+                latitude: order.isUndeliveredReturnToHub
+                    ? (order.rtoReturnLatitude ?? order.pickupLatitude)
+                    : order.pickupLatitude,
+                longitude: order.isUndeliveredReturnToHub
+                    ? (order.rtoReturnLongitude ?? order.pickupLongitude)
+                    : order.pickupLongitude,
+                address: order.isUndeliveredReturnToHub
+                    ? (order.rtoReturnAddress ?? order.pickupAddress!)
+                    : order.pickupAddress!,
               ),
             ),
           ],
@@ -662,11 +1017,25 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 SizedBox(width: 8.w),
                 Expanded(
-                  child: Text(
-                    order.formattedDeliverySchedule,
-                    style: CustomTextStyles.openSansSemiBold.copyWith(
-                      fontSize: 14.fSize,
-                      color: AppColours.primary.withValues(alpha: 0.9),
+                  child: RichText(
+                    text: TextSpan(
+                      children: [
+                        if (order.isReturnFlow)
+                          TextSpan(
+                            text: 'Return Schedule: ',
+                            style: CustomTextStyles.openSansSemiBold.copyWith(
+                              fontSize: 14.fSize,
+                              color: AppColours.primary,
+                            ),
+                          ),
+                        TextSpan(
+                          text: order.formattedDeliverySchedule,
+                          style: CustomTextStyles.openSansSemiBold.copyWith(
+                            fontSize: 14.fSize,
+                            color: AppColours.primary.withValues(alpha: 0.9),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -712,7 +1081,9 @@ class _HomeScreenState extends State<HomeScreen> {
           SizedBox(height: 24.h),
           Row(
             children: [
-              if (order.isNotDelivered || order.isRejectedStatus) ...[
+              if (order.isUndeliveredReturnToHub ||
+                  order.isNotDelivered ||
+                  order.isRejectedStatus) ...[
                 Expanded(
                   child: OutlinedButton(
                     onPressed: isUpdating
@@ -723,7 +1094,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               AppRoutes.orderDetailsScreen,
                               arguments: {
                                 'order': order,
-                                'enableWorkflow': false,
+                                'enableWorkflow': order.isUndeliveredReturnToHub,
                               },
                             );
                             if (updated is DpOrder) {
@@ -740,25 +1111,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: const Text(
                       'View Details',
                       style: TextStyle(color: Colors.white, fontSize: 13),
-                    ),
-                  ),
-                ),
-                SizedBox(width: 12.w),
-                Expanded(
-                  child: Container(
-                    alignment: Alignment.center,
-                    padding: EdgeInsets.symmetric(vertical: 14.h),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.red.withValues(alpha: 0.4)),
-                    ),
-                    child: Text(
-                      order.isReturnFlow ? 'RETURN FAILED' : 'NOT DELIVERED',
-                      style: CustomTextStyles.montserratBold.copyWith(
-                        fontSize: 13.fSize,
-                        color: Colors.redAccent,
-                      ),
                     ),
                   ),
                 ),
@@ -801,7 +1153,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: InkWell(
                       onTap: isUpdating
                           ? null
-                          : () => _showAcceptDialog(context, onAccept),
+                          : onAccept,
                       borderRadius: BorderRadius.circular(12),
                       child: Container(
                         alignment: Alignment.center,
@@ -815,12 +1167,14 @@ class _HomeScreenState extends State<HomeScreen> {
                                   color: Colors.black,
                                 ),
                               )
-                            : const Text(
-                                'Accept',
-                                style: TextStyle(
+                            : Text(
+                                order.isReturnFlow
+                                    ? 'Start Trip to Customer'
+                                    : 'Start Trip to Hub',
+                                style: const TextStyle(
                                   color: Colors.black,
                                   fontWeight: FontWeight.bold,
-                                  fontSize: 16,
+                                  fontSize: 15,
                                 ),
                               ),
                       ),
@@ -854,113 +1208,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!launched && mounted) {
       CustomSnackBar.showWarning(context, 'Unable to open maps.');
     }
-  }
-
-  void _showAcceptDialog(BuildContext context, VoidCallback onAccept) {
-    showDialog(
-      context: context,
-      barrierColor: Colors.black.withOpacity(0.7),
-      builder: (context) => Dialog(
-        backgroundColor: Colors.transparent,
-        insetPadding: EdgeInsets.symmetric(horizontal: 16.w),
-        child: Container(
-          padding: EdgeInsets.symmetric(
-            horizontal: 20.w,
-            vertical: 28.h,
-          ),
-
-          decoration: BoxDecoration(
-            color: Colors.black,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(
-              color: const Color(0xFFE6C27A).withOpacity(0.1),
-            ),
-            // boxShadow: [
-            //   BoxShadow(
-            //     color: const Color(0xFFE6C27A).withOpacity(0.12),
-            //     blurRadius: 20,
-            //     spreadRadius: 1,
-            //   ),
-            // ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-
-              /// Title
-              Text(
-                'Accept the Order ?',
-                style: CustomTextStyles.montserratBold.copyWith(
-                  fontSize: 16.fSize,
-                  color: const Color(0xFFE6C27A),
-                ),
-              ),
-
-              SizedBox(height: 30.h),
-
-              /// Buttons
-              Row(
-                children: [
-
-                  /// Back Button
-                  Expanded(
-                    child: SizedBox(
-                      height: 44.h,
-                      child: ElevatedButton(
-                        onPressed: () => Navigator.pop(context),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFF3E6C9),
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: Text(
-                          'Back',
-                          style: CustomTextStyles.montserratBold.copyWith(
-                            color: Colors.black,
-                            fontSize: 14.fSize,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-
-                  SizedBox(width: 16.w),
-
-                  /// Confirm Button
-                  Expanded(
-                    child: SizedBox(
-                      height: 44.h,
-                      child: ElevatedButton(
-                        onPressed: () {
-                          Navigator.pop(context);
-                          onAccept();
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFE6C27A),
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: Text(
-                          'Yes, Confirm',
-                          style: CustomTextStyles.montserratBold.copyWith(
-                            color: Colors.black,
-                            fontSize: 14.fSize,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   Widget _buildLocationRow(

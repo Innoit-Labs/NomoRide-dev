@@ -38,10 +38,16 @@ class MyOrdersRepository {
     return null;
   }
 
-  Future<MyOrdersData> getMyOrders() async {
+  Future<MyOrdersData> getMyOrders({bool failedOrders = false}) async {
     _ensureLoggedIn();
-    final uri = ApiConfig.myOrdersUri;
-    _logRequest('GET', uri);
+    final uri = failedOrders
+        ? ApiConfig.myOrdersUri.replace(
+            queryParameters: {'failedOrders': 'true'},
+          )
+        : ApiConfig.myOrdersUri;
+    debugPrint('========== MY ORDERS API REQUEST ==========');
+    debugPrint('GET: $uri');
+    debugPrint('===========================================');
 
     try {
       final response = await _client.get(
@@ -52,7 +58,20 @@ class MyOrdersRepository {
         },
       );
 
-      _logResponse(response.statusCode, response.body);
+      debugPrint('========== MY ORDERS API RESPONSE ==========');
+      debugPrint('Status: ${response.statusCode}');
+      debugPrint('Body:');
+      try {
+        final decoded = jsonDecode(response.body);
+        final pretty = const JsonEncoder.withIndent('  ').convert(decoded);
+        for (final line in pretty.split('\n')) {
+          debugPrint(line);
+        }
+      } catch (_) {
+        debugPrint(response.body);
+      }
+      developer.log(response.body, name: 'MY_ORDERS_API');
+      debugPrint('============================================');
       await SessionGuard.ensureAuthorized(response);
       final json = _tryParseJson(response.body);
       final success = json?['success'] as bool? ?? false;
@@ -60,25 +79,6 @@ class MyOrdersRepository {
       if (response.statusCode == 200 && success) {
         final payload = _ordersPayload(json);
         if (payload != null) {
-          debugPrint('[ORDER DEBUG] myorders response received');
-          final completed = payload['completedOrders'] ?? payload['completed_orders'];
-          final intransit = payload['intransist_orders'] ?? payload['in_transit_orders'] ?? payload['inTransitOrders'];
-          int totalItemsCount = 0;
-          void countItems(dynamic ordersList) {
-            if (ordersList is List) {
-              for (final order in ordersList) {
-                if (order is Map) {
-                  final items = order['items'] ?? order['products'];
-                  if (items is List) {
-                    totalItemsCount += items.length;
-                  }
-                }
-              }
-            }
-          }
-          countItems(completed);
-          countItems(intransit);
-          debugPrint('[ORDER DEBUG] items count: $totalItemsCount');
           return MyOrdersData.fromJson(payload);
         }
         throw const ApiException('Invalid my orders response from server.');
@@ -105,7 +105,9 @@ class MyOrdersRepository {
         json['completed_orders'] != null ||
         json['intransist_orders'] != null ||
         json['in_transit_orders'] != null ||
-        json['inTransitOrders'] != null) {
+        json['inTransitOrders'] != null ||
+        json['failedOrders'] != null ||
+        json['failed_orders'] != null) {
       return json;
     }
 
@@ -129,29 +131,4 @@ class MyOrdersRepository {
     return null;
   }
 
-  void _logRequest(String method, Uri uri) {
-    debugPrint('========== MY ORDERS API REQUEST ==========');
-    debugPrint('$method: $uri');
-    debugPrint('===========================================');
-  }
-
-  void _logResponse(int statusCode, String body) {
-    debugPrint('========== MY ORDERS API RESPONSE ==========');
-    debugPrint('Status: $statusCode');
-    debugPrint('Body:');
-    try {
-      final decoded = jsonDecode(body);
-      final pretty = const JsonEncoder.withIndent('  ').convert(decoded);
-      for (final line in pretty.split('\n')) {
-        debugPrint(line);
-      }
-    } catch (_) {
-      final pattern = RegExp('.{1,800}');
-      for (final match in pattern.allMatches(body)) {
-        debugPrint(match.group(0));
-      }
-    }
-    developer.log(body, name: 'MY_ORDERS_API');
-    debugPrint('============================================');
-  }
 }

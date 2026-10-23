@@ -116,5 +116,78 @@ void main() {
       expect(order.isReturnFlow, isFalse);
       expect(order.formattedDeliverySchedule, contains('Wednesday, 30th Sep 10:45 PM'));
     });
+
+    test('Return order with pickup_details (NOMO_ORD-285) displays return pickup slot instead of garment delivery slot', () {
+      final json = {
+        'id': 'order_285',
+        'order_number': 'NOMO_ORD-285',
+        'flow_type': 'return',
+        'status': 'return_assigned',
+        'pickup_details': {
+          'pickup_date': '10 Oct 2026',
+          'pickup_time': '07:30 AM',
+          'name': 'kphb',
+          'mobile': '6969696969',
+          'note': 'schedule before the date',
+        },
+        'items': [
+          {
+            'kitDetails': {
+              'delivery_date': '2026-10-22',
+              'delivery_time': '12:00 PM - 03:00 PM',
+            }
+          }
+        ],
+      };
+
+      final order = DpOrder.fromJson(json);
+
+      expect(order.isReturnFlow, isTrue);
+      // Garment delivery slot from original forward delivery
+      expect(order.deliveryDate, '2026-10-22');
+      expect(order.deliveryTime, '12:00 PM - 03:00 PM');
+      // Return pickup slot requested by customer
+      expect(order.returnDate, '2026-10-10');
+      expect(order.returnTime, '07:30 AM');
+      expect(order.customerName, 'kphb');
+      expect(order.customerPhone, '6969696969');
+      expect(order.displayNotes, 'schedule before the date');
+      // Crucial: Must display Saturday, 10th Oct 07:30 AM, NOT Thursday, 22nd Oct 12:00 PM - 03:00 PM!
+      expect(order.formattedDeliverySchedule, 'Saturday, 10th Oct 07:30 AM');
+      expect(order.formattedDeliverySchedule, isNot(contains('22nd Oct')));
+    });
+
+    test('Return order ignores the forward customer, schedule, and notes', () {
+      final json = {
+        'id': 'order_return_forward',
+        'order_number': 'NOMO_ORD-500',
+        'flow_type': 'return',
+        'status': 'in_transit_to_iap',
+        'pickup_confirmed_at': '2026-10-01T10:00:00Z',
+        'customer_name': 'Forward Customer',
+        'customer_mobile': '9000000000',
+        'order_note': 'forward delivery note',
+        'notes': 'forward delivery note',
+        'instructions': 'Leave at the door',
+        'delivery_date': '2026-10-22',
+        'delivery_time': '12:00 PM - 03:00 PM',
+        'pickup_details': {
+          'name': 'Return Customer',
+          'mobile': '8888888888',
+          'pickup_date': '2026-10-15',
+          'pickup_time': '09:00 AM',
+          'note': 'pick up the return kit',
+        },
+      };
+
+      final order = DpOrder.fromJson(json);
+
+      expect(order.customerName, 'Return Customer');
+      expect(order.customerPhone, '8888888888');
+      expect(order.displayNotes, 'pick up the return kit');
+      expect(order.formattedDeliverySchedule, contains('15th Oct'));
+      expect(order.formattedDeliverySchedule, isNot(contains('22nd Oct')));
+      expect(order.journey.statusBadgeLabel, 'En Route to Customer Location');
+    });
   });
 }

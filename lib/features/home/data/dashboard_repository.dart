@@ -14,13 +14,18 @@ class DashboardRepository {
 
   final http.Client _client;
 
-  Future<DashboardData> getDashboardData() async {
+  Future<DashboardData> getDashboardData({bool log = true}) async {
     if (!AuthSession.hasValidSession) {
       throw const ApiException('Please login to view dashboard data.');
     }
 
     final uri = ApiConfig.dashboardUri;
-    _logRequest(uri);
+    if (log) {
+      debugPrint('========== DASHBOARD API REQUEST ==========');
+      debugPrint('URL: $uri');
+      debugPrint('Method: GET');
+      debugPrint('===========================================');
+    }
 
     try {
       final response = await _client.get(
@@ -31,7 +36,12 @@ class DashboardRepository {
         },
       );
 
-      _logResponse(response.statusCode, response.body);
+      if (log) {
+        debugPrint('========== DASHBOARD API RESPONSE ==========');
+        debugPrint('Status: ${response.statusCode}');
+        debugPrint('Body: ${response.body}');
+        debugPrint('============================================');
+      }
       await SessionGuard.ensureAuthorized(response);
 
       final json = _tryParseJson(response.body);
@@ -66,18 +76,4 @@ class DashboardRepository {
     return null;
   }
 
-  void _logRequest(Uri uri) {
-    debugPrint('========== DASHBOARD API REQUEST ==========');
-    debugPrint('URL: $uri');
-    debugPrint('Method: GET');
-    debugPrint('Headers: ${jsonEncode(AuthSession.authHeaders)}');
-    debugPrint('===========================================');
-  }
-
-  void _logResponse(int statusCode, String body) {
-    debugPrint('========== DASHBOARD API RESPONSE ==========');
-    debugPrint('Status: $statusCode');
-    debugPrint('Body: $body');
-    debugPrint('============================================');
-  }
 }

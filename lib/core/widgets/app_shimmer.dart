@@ -81,6 +81,38 @@ class HomeHeaderShimmer extends StatelessWidget {
   }
 }
 
+class HomeOnlineToggleShimmer extends StatelessWidget {
+  const HomeOnlineToggleShimmer({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AppShimmer(
+      child: Container(
+        width: double.infinity,
+        padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 12.h),
+        decoration: BoxDecoration(
+          color: AppShimmer.baseColor,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AppShimmer.circle(10.w),
+                SizedBox(width: 8.w),
+                AppShimmer.box(width: 96.w, height: 16.h, borderRadius: 4),
+              ],
+            ),
+            AppShimmer.box(width: 44.w, height: 26.h, borderRadius: 14),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class HomeStatsShimmer extends StatelessWidget {
   const HomeStatsShimmer({super.key});
 
@@ -157,7 +189,15 @@ class HomeOrdersShimmer extends StatelessWidget {
               AppShimmer.box(width: 72.w, height: 32.h, borderRadius: 20),
             ],
           ),
-          SizedBox(height: 20.h),
+          SizedBox(height: 12.h),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              AppShimmer.box(width: 110.w, height: 14.h, borderRadius: 4),
+              AppShimmer.box(width: 90.w, height: 22.h, borderRadius: 16),
+            ],
+          ),
+          SizedBox(height: 16.h),
           AppShimmer.box(width: 120.w, height: 12.h, borderRadius: 6),
           SizedBox(height: 8.h),
           AppShimmer.box(width: double.infinity, height: 36.h, borderRadius: 8),
