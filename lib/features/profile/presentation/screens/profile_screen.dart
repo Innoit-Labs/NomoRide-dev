@@ -459,8 +459,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void _showLogoutDialog(BuildContext context) {
     showDialog(
       context: context,
-      builder: (context) => _buildStyledDialog(
-        context,
+      builder: (dialogContext) => _buildStyledDialog(
+        dialogContext,
         icon: SvgPicture.asset(
           IconConstant.iconLogout,
           height: 24.h,
@@ -472,6 +472,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
         title: 'Are you sure you want to Logout?',
         onConfirm: () async {
+          Navigator.pop(dialogContext);
+          try {
+            await _repository.updateIsLoggedIn(false);
+          } on ApiException catch (error) {
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(error.message),
+                backgroundColor: Colors.red.shade800,
+              ),
+            );
+            return;
+          } catch (_) {
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Something went wrong. Please try again.'),
+                backgroundColor: Colors.red,
+              ),
+            );
+            return;
+          }
           await AuthSession.clear();
           ProfileRepository.clearCache();
           if (!context.mounted) return;

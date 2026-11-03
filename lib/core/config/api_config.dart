@@ -66,6 +66,9 @@ class ApiConfig {
   static Uri get updateIsOnlineUri =>
       Uri.parse('$baseUrl$_mobileDeliveryPartners/update_isonline');
 
+  static Uri get updateIsLoggedInUri =>
+      Uri.parse('$baseUrl$_mobileDeliveryPartners/update_is_logged_in');
+
   static Uri get updateBankAccountDetailsUri =>
       Uri.parse('$baseUrl$_mobileDeliveryPartners/updateBankAccountDetails');
 
