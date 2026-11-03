@@ -144,6 +144,48 @@ class ProfileRepository {
     }
   }
 
+  /// Marks the partner logged out on the server. Call this before clearing the
+  /// local session so the auth token is still sent.
+  Future<void> updateIsLoggedIn(bool isLoggedIn) async {
+    if (!AuthSession.hasValidSession) return;
+    final uri = ApiConfig.updateIsLoggedInUri;
+    final body = jsonEncode({'isLoggedin': isLoggedIn});
+    _logRequest('PUT', uri, body: body);
+
+    try {
+      final response = await _client.put(
+        uri,
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          ...AuthSession.authHeaders,
+        },
+        body: body,
+      );
+
+      _logResponse(response.statusCode, response.body);
+      final json = _tryParseJson(response.body);
+      final success = json?['success'] as bool? ?? false;
+      if ((response.statusCode == 200 || response.statusCode == 201) &&
+          success) {
+        return;
+      }
+
+      throw ApiException(
+        _extractErrorMessage(json, response.body) ??
+            'Failed to update login status (${response.statusCode})',
+        statusCode: response.statusCode,
+      );
+    } on ApiException {
+      rethrow;
+    } on SocketException {
+      throw const ApiException('No internet connection. Please try again.');
+    } catch (error) {
+      if (error is ApiException) rethrow;
+      throw const ApiException('Something went wrong. Please try again.');
+    }
+  }
+
   Future<bool> updateIsOnline(bool isOnline) async {
     _ensureLoggedIn();
     final uri = ApiConfig.updateIsOnlineUri;
